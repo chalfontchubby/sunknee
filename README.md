@@ -1,4 +1,4 @@
-# sunknee
+# SunKnee
 
 Determine solar panel pose from power output.
 
