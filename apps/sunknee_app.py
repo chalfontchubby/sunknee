@@ -38,6 +38,7 @@ class SunKnee(Hass):
         self.export_dir = Path(self.args.get("export_dir", "/config/apps/sunknee/data"))
         self.export_dir.mkdir(parents=True, exist_ok=True)
         self.threshold_w = float(self.args.get("knee_threshold_w", 10.0))
+        self.peak_percentile = float(self.args.get("peak_percentile", 95.0))
 
         self.capture = self._load_or_start_capture(self._today())
 
@@ -103,7 +104,7 @@ class SunKnee(Hass):
         )
 
     def _publish_stats(self):
-        stats = summary_stats(self.capture.readings)
+        stats = summary_stats(self.capture.readings, self.peak_percentile)
         self.set_state(
             READINGS_TODAY_ENTITY,
             state=stats["count"],
@@ -122,6 +123,8 @@ class SunKnee(Hass):
                 "device_class": "power",
                 "state_class": "measurement",
                 "peak_at": stats["peak_at"],
+                "raw_max_watts": stats["raw_max_watts"],
+                "peak_percentile": self.peak_percentile,
             },
             check_existence=False,
         )

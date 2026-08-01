@@ -11,5 +11,6 @@ sunknee:
   export_dir: /config/apps/sunknee/data
   # Naive placeholder knee threshold (watts) -- see sunknee/naive_knee.py.
   knee_threshold_w: 10
-
-  
+  # Percentile used for sensor.sunknee_peak_power_today, to reject
+  # single-sample spikes that a literal max() would pick up.
+  peak_percentile: 95
