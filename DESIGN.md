@@ -58,6 +58,22 @@ of) Solcast.
 - AppDaemon merges every `apps.yaml` it finds recursively under the
   apps directory, so sunknee lives in its own subdirectory without
   touching Predbat's existing config.
+- Site latitude/longitude aren't captured anywhere yet -- `knee.py`'s
+  stub already takes them as parameters, but nothing supplies them.
+  Rather than duplicating them into `apps.yaml` by hand, HA's built-in
+  `zone.home` entity already carries `latitude`/`longitude` attributes
+  (it has to, for `sun.sun` and weather integrations to work) --
+  `self.get_state("zone.home", attribute="latitude")` should give the
+  real value directly, no separate config or derivation needed.
+- More precise cross-check numbers, for whenever the estimator
+  converges enough to compare against: Solcast is configured at
+  −160.25° in its own signed (0=N, wraps past ±180°) convention, which
+  unwraps to 199.75° true bearing. An independent measurement (Suunto
+  baseplate compass, multiple sighting points along the house with a
+  rod for alignment, corrected for the site's +1°01′ magnetic
+  declination) puts it at ~196.0° true -- a ~3.7° gap between the two,
+  itself resting on the assumption that the house's walls are square
+  and parallel to the roof/panel plane.
 
 ### Output
 - Publish a forecast sensor via AppDaemon's `set_state` for tomorrow's
