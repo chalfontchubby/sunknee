@@ -11,6 +11,15 @@ sunknee:
   export_dir: /config/apps/sunknee/data
   # Naive placeholder knee threshold (watts) -- see sunknee/naive_knee.py.
   knee_threshold_w: 10
-  # Percentile used for sensor.sunknee_peak_power_today, to reject
-  # single-sample spikes that a literal max() would pick up.
+  # sensor.sunknee_peak_power_today tracks the running max of a
+  # percentile taken over a trailing window of readings -- rejects lone
+  # spikes without ever falling as the day's power declines. Window is a
+  # reading count, not a duration; tune it to roughly a few minutes based
+  # on how often pv_power_entity actually updates.
   peak_percentile: 95
+  peak_window: 40
+  # sensor.sunknee_fit_peak_power_today cross-checks the above by fitting
+  # a parabola to the smoothed daily curve and reading off its vertex.
+  # Doesn't appear until there are at least this many readings *and* the
+  # fit shows a genuine downward hump (not just a rising morning).
+  fit_min_points: 30
