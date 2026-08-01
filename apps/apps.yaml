@@ -1,0 +1,13 @@
+sunknee:
+  module: sunknee_app
+  class: SunKnee
+  # Replace with your Sigenergy PV power sensor's entity_id -- check
+  # Developer Tools > States in HA. Likely named after the integration's
+  # "plant_sigen_photovoltaic_power" register (device "Sigen Plant"),
+  # e.g. sensor.sigen_plant_photovoltaic_power -- but confirm the exact
+  # entity_id rather than assuming.
+  pv_power_entity: sensor.REPLACE_ME_PV_POWER
+  # Where DayCapture JSON exports land inside the AppDaemon container.
+  export_dir: /conf/apps/sunknee/data
+  # Naive placeholder knee threshold (watts) -- see sunknee/naive_knee.py.
+  knee_threshold_w: 10
