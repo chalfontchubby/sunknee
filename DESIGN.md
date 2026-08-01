@@ -43,6 +43,21 @@ of) Solcast.
   existing third-party HA integration polls it for live sensors,
   5-min-per-endpoint rate limit) — worth checking whether it exposes a
   bulk historical query endpoint too, vs. only live polling.
+- Confirmed setup: Home Assistant OS with Supervisor, AppDaemon running
+  as the AppDaemon add-on (not a bare pip install). Its apps directory
+  is the add-on's own config folder, on the host at
+  `/addon_configs/<hash>_appdaemon/apps/` — distinct from HA core's
+  `/config`, and not the same as the generic AppDaemon docs' `/conf`
+  path.
+- Deployment gotcha: AppDaemon's directory walk (which decides what to
+  add to the Python import path) does not follow symlinks. A symlinked
+  app directory gets its `apps.yaml` discovered but the `.py` module
+  fails to import (`ModuleNotFoundError`) with no more specific error.
+  Deploy by cloning the repo directly into a real directory under the
+  apps folder, not by symlinking one in from elsewhere.
+- AppDaemon merges every `apps.yaml` it finds recursively under the
+  apps directory, so sunknee lives in its own subdirectory without
+  touching Predbat's existing config.
 
 ### Output
 - Publish a forecast sensor via AppDaemon's `set_state` for tomorrow's
@@ -54,9 +69,35 @@ of) Solcast.
 - Drift alert: notify if converged (tilt, azimuth) departs from the
   configured 36°/~202° by more than a few degrees.
 
+### Implementation status
+Diagnostics and integration were built before the algorithm, deliberately
+— the goal is to see real generation data (raw curve, detected knees,
+fitted curves) before committing to the estimator's internals.
+
+- `src/sunknee/capture.py`: stdlib-only day-capture data model (JSON),
+  used both by the AppDaemon app and local tooling.
+- `apps/sunknee_app.py`: deployed AppDaemon app. Publishes a
+  `sensor.sunknee_status` liveness sensor, listens to the Sigenergy PV
+  power sensor, writes/updates a per-day JSON capture file, and
+  publishes naive knee-time sensors (`sensor.sunknee_knee_morning` /
+  `_evening`) so the raw signal can be charted natively in HA without
+  anything extra installed there.
+- `src/sunknee/naive_knee.py`: placeholder threshold-crossing knee
+  detector powering those HA sensors — explicitly not the real
+  algorithm above (no direct/diffuse decomposition, no linear
+  extrapolation), just enough to sanity-check that data is flowing.
+- `src/sunknee/diagnostics.py`: local-only matplotlib CLI
+  (`uv run sunknee-plot capture.json`) that plots a captured day's raw
+  curve with the naive knee markers.
+- `src/sunknee/knee.py`, `envelope.py`, `estimator.py`: unimplemented
+  stubs for the real algorithm described above — not started yet.
+
 ### Open decisions for implementation
 - Storage: SQLite vs. flat JSON for the rolling data store (avoid
-  depending on HA recorder for anything beyond ~2 weeks).
+  depending on HA recorder for anything beyond ~2 weeks). The capture
+  export format above (per-day JSON) is the debug/diagnostics facility,
+  not necessarily this decision — the estimator's own rolling state
+  store is still open.
 - Whether to implement knee-detection and envelope-fitting as two
   independent estimators feeding one Kalman update, or a single combined
   cost function.
