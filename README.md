@@ -28,10 +28,12 @@ Full design notes, prior art, and open implementation decisions are in
 
 ## Status
 
-Early design stage — no code yet. Not a Solcast replacement or a
-Solcast-correction tool (no API exists for writing back into their
-model); this runs alongside existing forecast sources for comparison
-and drift detection.
+Early stage: capture mode and a hello-world AppDaemon deployment are
+working end to end; the actual tilt/azimuth estimation algorithm isn't
+built yet (see `src/sunknee/knee.py`, `envelope.py`, `estimator.py`).
+Not a Solcast replacement or a Solcast-correction tool (no API exists
+for writing back into their model); this runs alongside existing
+forecast sources for comparison and drift detection.
 
 ## Requirements (planned)
 
@@ -73,19 +75,34 @@ captured data.
 
 ## Deploying to AppDaemon
 
-1. On the Pi, clone/pull this repo somewhere AppDaemon can reach (or
-   symlink AppDaemon's `apps_dir` at this repo's `apps/` directory).
+1. Clone this repo **directly into a real directory under AppDaemon's
+   apps directory** — e.g. for the HA OS AppDaemon add-on:
+   ```
+   git clone <this repo's URL> /addon_configs/<slug>_appdaemon/apps/sunknee
+   ```
+   Don't symlink it in from elsewhere: AppDaemon's directory walk (which
+   decides what to add to the Python import path) doesn't follow
+   symlinks, so a symlinked app directory gets its `apps.yaml` picked up
+   but `sunknee_app.py` fails to import (`ModuleNotFoundError:
+   No module named 'sunknee_app'`). The one symlink inside the repo
+   itself (`apps/sunknee` → `../src/sunknee`) is fine, since that's
+   resolved by Python's own import machinery once the containing
+   directory is already on `sys.path`, not by AppDaemon's walk.
 2. Edit `apps/apps.yaml` and set `pv_power_entity` to your Sigenergy PV
    power sensor's real entity_id.
 3. AppDaemon hot-reloads on file changes. Check HA for
    `sensor.sunknee_status` (should read `running` — the hello-world
    liveness check) and, once there's daylight data,
-   `sensor.sunknee_knee_morning` / `sensor.sunknee_knee_evening`.
+   `sensor.sunknee_knee_morning` / `sensor.sunknee_knee_evening`. If it
+   doesn't show up, check the add-on's own log (Settings → Add-ons →
+   AppDaemon → Log tab, or `ha addons logs <slug>_appdaemon`) — that's
+   separate from Settings → System → Logs, which only covers HA core.
 4. Capture JSON lands in `export_dir` (default
-   `/conf/apps/sunknee/data/YYYY-MM-DD.json`) inside the AppDaemon
+   `/config/apps/sunknee/data/YYYY-MM-DD.json`) inside the AppDaemon
    container, one file per day, updated on every sensor reading. Pull
    these files back here (scp/Samba/whatever you use) to run
    `sunknee-plot` against real data.
+5. Updates: `cd /addon_configs/<slug>_appdaemon/apps/sunknee && git pull`.
 
 ## License
 

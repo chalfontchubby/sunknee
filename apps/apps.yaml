@@ -8,6 +8,6 @@ sunknee:
   # entity_id rather than assuming.
   pv_power_entity: sensor.REPLACE_ME_PV_POWER
   # Where DayCapture JSON exports land inside the AppDaemon container.
-  export_dir: /conf/apps/sunknee/data
+  export_dir: /config/apps/sunknee/data
   # Naive placeholder knee threshold (watts) -- see sunknee/naive_knee.py.
   knee_threshold_w: 10
