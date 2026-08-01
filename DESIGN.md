@@ -23,7 +23,9 @@ of) Solcast.
   is `ha-solcast-solar`'s per-hour dampening factors, which is a local
   multiplier on their output, not a model update.
 
-## Environment
+## Architecture
+
+### Environment
 - AppDaemon already running (hosts Predbat) on a Pi — this is a second
   AppDaemon app in the same container. `pvlib` installs via AppDaemon's
   `python_packages` config, no new infra needed.
@@ -42,32 +44,101 @@ of) Solcast.
   5-min-per-endpoint rate limit) — worth checking whether it exposes a
   bulk historical query endpoint too, vs. only live polling.
 
-## Algorithm design
+### Output
+- Publish a forecast sensor via AppDaemon's `set_state` for tomorrow's
+  expected generation, derived from the converged tilt/azimuth plus
+  whatever cloud/weather input is available.
+- Predbat's `pv_forecast` config accepts arbitrary sensor entities, so
+  this can run alongside Solcast for comparison rather than requiring a
+  cutover.
+- Drift alert: notify if converged (tilt, azimuth) departs from the
+  configured 36°/~202° by more than a few degrees.
 
-### Primary signal: morning/evening "knee" timing
-The knee (generation on/off transition) occurs when the sun crosses the
-plane of the array (angle of incidence → 90°) — a pure geometry event,
-independent of irradiance magnitude. This makes it far more robust to
-broken cloud than full-curve fitting: doesn't need a clean bell curve,
-just enough light near dawn/dusk to detect the transition.
+### Open decisions for implementation
+- Storage: SQLite vs. flat JSON for the rolling data store (avoid
+  depending on HA recorder for anything beyond ~2 weeks).
+- Whether to implement knee-detection and envelope-fitting as two
+  independent estimators feeding one Kalman update, or a single combined
+  cost function.
+- Backfill source priority: HA recorder (recent, fine-grained) → HA
+  long-term stats (older, coarse) → Sigen Cloud CSV export (potentially
+  fine-grained and older, manual one-off) → Sigenergy OpenAPI historical
+  endpoint if one exists (not yet confirmed).
+- Not in scope initially: writing back to Solcast (no API for it
+  currently; local dampening-factor tuning is the closest existing
+  lever if wanted later).
 
-- Compute expected AOI=90° crossing times via `pvlib.solarposition` for
-  candidate (tilt, azimuth).
-- Fit against observed knee times across many days, ideally spanning
-  seasons: azimuth mostly governs morning/evening asymmetry relative to
-  solar noon; tilt mostly governs how that asymmetry changes with solar
-  declination through the year. Seasonal spread separates the two
-  parameters much better than any single day's curve shape.
+## Algorithm Details
 
-Known confounders to model explicitly, not ignore:
-- **Horizon shading** (trees, structures) shifts observed knee times
-  independent of panel geometry, and asymmetrically (e.g. only mornings
-  late → shading to the east, not an azimuth error). Model as a
-  separate, slowly-varying bias term.
-- **Inverter low-light MPPT behaviour** (startup threshold/hysteresis)
-  adds a systematic, fairly stable per-inverter offset to observed knee
-  vs. true geometric knee. Fittable, not just noise — don't assume
-  knee = geometry exactly.
+### Signal decomposition: direct vs. diffuse
+Total generation = direct (beam) + diffuse (sky dome) component. These
+have distinct shapes near the morning/evening boundary, and this
+distinction is the key to reliable knee detection:
+
+- **Direct** has a genuinely sharp cutoff at the true geometric knee
+  (AOI=90°, sun crosses the plane of the array) — a hard boundary, no
+  gradual decay.
+- **Diffuse** doesn't disappear when direct does — it's a view-factor
+  integral over the visible sky dome, so it decays gradually and
+  contributes a small tail *past* the true geometric knee.
+
+This means naive "power crosses a noise-floor threshold" detection is
+biased late: the diffuse tail smears the observable transition past the
+true direct-cutoff you actually want for pose estimation.
+
+### Knee estimation: linear extrapolation of the direct component
+Rather than detecting the transition directly, fit and extrapolate:
+
+1. Take a rough changepoint estimate first (slope-based, e.g. where the
+   derivative shifts from steep to shallow) to bound a candidate window.
+2. Fit a straight line to the steep, direct-dominated segment of the
+   curve just before that changepoint.
+3. Extrapolate the line to its zero-crossing — that x-intercept is the
+   knee estimate.
+
+This works because near AOI=90°, cos(AOI) is locally linear in angle
+(derivative of cosine is maximal there), and solar angular motion is
+smooth over a short window, so direct-component power is close to
+linear in time just before the true knee. The zero-crossing is
+determined by the line's slope and position, not its height — so
+day-to-day DNI magnitude noise (haze, thin cloud) mostly changes the
+line's steepness and only weakly perturbs where it crosses zero. This
+gives meaningfully lower variance per-day than waiting for power to
+visibly hit a threshold.
+
+Practical notes:
+- Iterate: rough changepoint bounds the fit window, linear fit run
+  within it, then re-extrapolate — self-correcting rather than circular.
+- Needs a handful of samples with non-trivial direct signal in the
+  window, not a clean view of the knee itself.
+- Sensor resolution matters here: worth checking empirically whether
+  the Sigenergy sensor's interval (and any inverter-side MPPT smoothing)
+  gives enough points in the linear segment to fit well, or whether the
+  window needs widening (at the cost of more diffuse contamination) to
+  get enough data.
+
+### Separating shading signal from pose signal
+Shading can only push an *observed* knee inward relative to the true
+unobstructed geometric knee (later mornings, earlier evenings) — never
+outward. This gives a clean way to distinguish "this knee is telling me
+about panel pose" from "this knee is telling me about an obstruction":
+
+- Track knee times per day using the extrapolation method above.
+- Take the extremum (earliest morning, latest evening) across a rolling
+  window, using a percentile (e.g. 90–95th) rather than literal min/max
+  to reject noise the same way the amplitude-envelope approach rejects
+  overshoot outliers.
+- If the extremum converges and continues to track seasonal movement as
+  geometry predicts → treat as a valid pose (tilt/azimuth) observation.
+- If the extremum plateaus and stops moving despite months of new data
+  → that side is permanently obstructed at that boundary. Stop using it
+  for pose fitting; treat the pinned value itself as a measurement for
+  the horizon-profile stretch goal instead (see below) — it's not
+  wasted, it's literally one point on the site's skyline (elevation, at
+  the azimuth implied by that time of year).
+- Tilt/azimuth remains identifiable from a single unobstructed knee's
+  seasonal drift alone if the other side is permanently shaded — slower
+  convergence than having both sides, but not blocked.
 
 ### Secondary signal: envelope/percentile baseline curve
 For days that aren't fully clear (most of them), reconstruct a
@@ -91,15 +162,25 @@ updated once per usable day (either a knee-time observation or an
 envelope-fit observation). Converges over weeks, damps single-day noise
 (one dirty panel, a bird incident, a single bad fit).
 
-## Output
-- Publish a forecast sensor via AppDaemon's `set_state` for tomorrow's
-  expected generation, derived from the converged tilt/azimuth plus
-  whatever cloud/weather input is available.
-- Predbat's `pv_forecast` config accepts arbitrary sensor entities, so
-  this can run alongside Solcast for comparison rather than requiring a
-  cutover.
-- Drift alert: notify if converged (tilt, azimuth) departs from the
-  configured 36°/~202° by more than a few degrees.
+### Stretch goal: horizon profile from power data
+A horizon profile (azimuth/elevation pairs describing the site's
+skyline) is a standard input already consumed by `pvlib`, PVGIS, and
+PVsyst — normally captured by fisheye photo or terrain data. This
+project can derive the same artifact from power data alone:
+
+- Bin observed sun positions by azimuth, using the converged
+  tilt/azimuth model.
+- For each azimuth bin, find the minimum elevation at which generation
+  reliably switches on across many days/seasons.
+- Assemble into a standard `.HOR`-style profile, feed back into
+  `pvlib`'s existing horizon-shading DNI adjustment.
+- Resolution is naturally strongest near the horizon (where the sun
+  spends time at low elevation across many days/azimuths) and weak at
+  high elevation — a reasonable match, since horizon obstructions rarely
+  extend far up anyway.
+- Requires the core tilt/azimuth estimate to have converged first, since
+  azimuth-binning depends on it. Build after the core estimator is
+  working, not alongside it.
 
 ## Prior art / references
 - Lonij, V. et al. — fleet-based tilt/orientation estimation via 80th
@@ -110,18 +191,5 @@ envelope-fit observation). Converges over weeks, damps single-day noise
 - Data-driven curve-matching method for tilt/azimuth inference from PV
   generation + off-site irradiance (ScienceDirect, ~4.5°/4.3° MAE).
 - `pvlib` / `pvanalytics` — solar position, clear-sky models
-  (Ineichen/Haurwitz), existing clear-sky detection utilities.
-
-## Open decisions for implementation
-- Storage: SQLite vs. flat JSON for the rolling data store (avoid
-  depending on HA recorder for anything beyond ~2 weeks).
-- Whether to implement knee-detection and envelope-fitting as two
-  independent estimators feeding one Kalman update, or a single combined
-  cost function.
-- Backfill source priority: HA recorder (recent, fine-grained) → HA
-  long-term stats (older, coarse) → Sigen Cloud CSV export (potentially
-  fine-grained and older, manual one-off) → Sigenergy OpenAPI historical
-  endpoint if one exists (not yet confirmed).
-- Not in scope initially: writing back to Solcast (no API for it
-  currently; local dampening-factor tuning is the closest existing
-  lever if wanted later).
+  (Ineichen/Haurwitz), existing clear-sky detection utilities, and
+  built-in horizon-shading DNI adjustment from az/el profiles.
