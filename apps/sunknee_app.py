@@ -23,17 +23,19 @@ from appdaemon.plugins.hass.hassapi import Hass
 
 from sunknee import __version__
 from sunknee.capture import DayCapture, Reading
-from sunknee.naive_knee import naive_knee_indices
+from sunknee.naive_knee import naive_knee_indices, summary_stats
 
 STATUS_ENTITY = "sensor.sunknee_status"
 KNEE_MORNING_ENTITY = "sensor.sunknee_knee_morning"
 KNEE_EVENING_ENTITY = "sensor.sunknee_knee_evening"
+READINGS_TODAY_ENTITY = "sensor.sunknee_readings_today"
+PEAK_POWER_ENTITY = "sensor.sunknee_peak_power_today"
 
 
 class SunKnee(Hass):
     def initialize(self):
         self.pv_power_entity = self.args["pv_power_entity"]
-        self.export_dir = Path(self.args.get("export_dir", "/conf/apps/sunknee/data"))
+        self.export_dir = Path(self.args.get("export_dir", "/config/apps/sunknee/data"))
         self.export_dir.mkdir(parents=True, exist_ok=True)
         self.threshold_w = float(self.args.get("knee_threshold_w", 10.0))
 
@@ -81,6 +83,7 @@ class SunKnee(Hass):
         self.capture.save(self._capture_path(self.capture.date))
 
         self._publish_naive_knees()
+        self._publish_stats()
 
     def _publish_naive_knees(self):
         morning_i, evening_i = naive_knee_indices(self.capture.readings, self.threshold_w)
@@ -96,5 +99,29 @@ class SunKnee(Hass):
             KNEE_EVENING_ENTITY,
             state=self.capture.readings[evening_i].timestamp,
             attributes={"friendly_name": "sunknee evening knee (naive)", "device_class": "timestamp"},
+            check_existence=False,
+        )
+
+    def _publish_stats(self):
+        stats = summary_stats(self.capture.readings)
+        self.set_state(
+            READINGS_TODAY_ENTITY,
+            state=stats["count"],
+            attributes={
+                "friendly_name": "sunknee readings today",
+                "state_class": "measurement",
+            },
+            check_existence=False,
+        )
+        self.set_state(
+            PEAK_POWER_ENTITY,
+            state=stats["peak_watts"],
+            attributes={
+                "friendly_name": "sunknee peak power today",
+                "unit_of_measurement": "W",
+                "device_class": "power",
+                "state_class": "measurement",
+                "peak_at": stats["peak_at"],
+            },
             check_existence=False,
         )
