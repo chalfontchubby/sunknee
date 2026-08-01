@@ -239,6 +239,11 @@ project can derive the same artifact from power data alone:
   azimuth-binning depends on it. Build after the core estimator is
   working, not alongside it.
 
+### Note on upstream contribution
+The linear-extrapolation knee method and the power-derived horizon
+profile are novel enough that they *could* theoretically interest `pvanalytics` maintainers, but contributing to a scientific-computing library requires a level of domain confidence and review-readiness this project isn't aiming for — solar engineering isn't the core expertise here, this is a personal tool built for one system. Not a planned direction; noted only so it's not forgotten if the method ever proves unusually solid.
+
+
 ## Prior art / references
 - Lonij, V. et al. — fleet-based tilt/orientation estimation via 80th
   percentile time-of-day method.
@@ -250,3 +255,5 @@ project can derive the same artifact from power data alone:
 - `pvlib` / `pvanalytics` — solar position, clear-sky models
   (Ineichen/Haurwitz), existing clear-sky detection utilities, and
   built-in horizon-shading DNI adjustment from az/el profiles.
+
+
