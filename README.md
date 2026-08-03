@@ -99,10 +99,16 @@ captured data.
    separate from Settings → System → Logs, which only covers HA core.
 4. Capture JSON lands in `export_dir` (default
    `/config/apps/sunknee/data/YYYY-MM-DD.json`) inside the AppDaemon
-   container, one file per day, updated on every sensor reading. Pull
-   these files back here (scp/Samba/whatever you use) to run
-   `sunknee-plot` against real data.
-5. Updates: `cd /addon_configs/<slug>_appdaemon/apps/sunknee && git pull`.
+   container, one file per day, updated on every sensor reading.
+5. To pull that data down for local analysis without SSH: visit
+   `http://<appdaemon-host>:<appdaemon-http-port>/app/sunknee_download`
+   in a browser (or `curl -O -J <that URL>`) — it zips every captured
+   day and serves it with a download header, straight to your
+   Downloads folder, the same way Predbat's debug-info download works.
+   The port is whatever `http:` is configured to in your `appdaemon.yaml`
+   (Predbat's own dashboard already proves this is enabled). Unzip
+   locally and run `sunknee-plot` against whichever day you want.
+6. Updates: `cd /addon_configs/<slug>_appdaemon/apps/sunknee && git pull`.
 
 ## License
 

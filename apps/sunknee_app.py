@@ -1,8 +1,8 @@
 """AppDaemon entry point for sunknee.
 
 Deployed onto the Home Assistant/AppDaemon host (see apps/apps.yaml and
-README.md "Deploying" for how this directory gets there). Two jobs, both
-ahead of any real estimation algorithm (see DESIGN.md):
+README.md "Deploying" for how this directory gets there). Three jobs,
+all ahead of any real estimation algorithm (see DESIGN.md):
 
 1. Liveness: publish sensor.sunknee_status so the app's presence is
    visible in HA -- the "hello world" proof that deployment worked.
@@ -11,14 +11,25 @@ ahead of any real estimation algorithm (see DESIGN.md):
    and publish naive placeholder knee-time sensors so the raw signal can
    also be charted natively in HA (history graph / Lovelace) without
    needing anything installed here beyond this app.
+3. A download route (AppDaemon's register_route, not register_endpoint
+   -- the latter force-wraps everything as inline JSON with no header
+   control) that zips up the capture files and serves them with a
+   Content-Disposition header, so hitting the URL in a browser saves a
+   zip straight to Downloads, the same way Predbat's debug-info download
+   works.
 
 Only imports sunknee.capture and sunknee.naive_knee, both stdlib-only --
-matplotlib (sunknee.diagnostics) is never loaded on this side.
+matplotlib (sunknee.diagnostics) is never loaded on this side. aiohttp
+is used for the download route only; it's already bundled with
+AppDaemon itself, not a new dependency.
 """
 from __future__ import annotations
 
+import io
+import zipfile
 from pathlib import Path
 
+from aiohttp import web
 from appdaemon.plugins.hass.hassapi import Hass
 
 from sunknee import __version__
@@ -61,6 +72,7 @@ class SunKnee(Hass):
         self.log(f"sunknee {__version__} started, watching {self.pv_power_entity}")
 
         self.listen_state(self._on_power_change, self.pv_power_entity)
+        self.register_route(self._download_capture, "sunknee_download")
 
     def _today(self) -> str:
         return self.get_now().strftime("%Y-%m-%d")
@@ -157,6 +169,25 @@ class SunKnee(Hass):
                 },
                 check_existence=False,
             )
+
+    async def _download_capture(self, request, kwargs):
+        """Zip all captured day-JSON files and serve them with a
+        Content-Disposition header -- hitting this URL in a browser
+        downloads sunknee_export.zip straight to Downloads, no SSH
+        needed. Route callbacks must be async (AppDaemon awaits them
+        directly, unlike the sync-friendly listen_state/set_state
+        calls elsewhere in this app), but the zipping itself is plain
+        sync file I/O -- fine for an occasional, manually-triggered call.
+        """
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in sorted(self.export_dir.glob("*.json")):
+                zf.write(path, arcname=path.name)
+        return web.Response(
+            body=buffer.getvalue(),
+            content_type="application/zip",
+            headers={"Content-Disposition": 'attachment; filename="sunknee_export.zip"'},
+        )
 
     def _publish_fit_peak(self):
         fit = fit_peak(self.peak_tracker.smoothed_series, min_points=self.fit_min_points)
