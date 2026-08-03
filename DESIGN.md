@@ -26,9 +26,18 @@ of) Solcast.
 ## Architecture
 
 ### Environment
-- AppDaemon already running (hosts Predbat) on a Pi — this is a second
-  AppDaemon app in the same container. `pvlib` installs via AppDaemon's
-  `python_packages` config, no new infra needed.
+- Originally assumed Predbat and sunknee would share one AppDaemon
+  container -- turned out wrong once actually deployed. They're
+  separate HA add-ons (`6adb4f0d_predbat`, `a0d7b954_appdaemon`), each
+  with its own config, confirmed directly from the filesystem. Whether
+  Predbat's add-on still uses AppDaemon internally at all is a separate,
+  softer claim -- Predbat reportedly moved away from that architecture
+  at some point (unverified here, per recollection rather than direct
+  inspection) -- but it doesn't matter either way: nothing in sunknee's
+  config or deployment touches Predbat's, and nothing about Predbat's
+  own setup (its dashboard being reachable, say) is evidence about
+  sunknee's AppDaemon instance specifically. `pvlib` installs via
+  AppDaemon's `python_packages` config, no new infra needed.
 - PV generation sensor comes from the Sigenergy Modbus HA integration.
 - HA recorder purges detailed history after `purge_keep_days` (default
   10 days) — **increase this now** so full-resolution data accumulates
@@ -57,7 +66,9 @@ of) Solcast.
   apps folder, not by symlinking one in from elsewhere.
 - AppDaemon merges every `apps.yaml` it finds recursively under the
   apps directory, so sunknee lives in its own subdirectory without
-  touching Predbat's existing config.
+  touching whatever else is already defined there (in this case, an
+  earlier `hello.py` test app in the same `a0d7b954_appdaemon` add-on --
+  not Predbat, which is a separate add-on entirely, see above).
 - Site latitude/longitude aren't captured anywhere yet -- `knee.py`'s
   stub already takes them as parameters, but nothing supplies them.
   Rather than duplicating them into `apps.yaml` by hand, HA's built-in
@@ -74,11 +85,16 @@ of) Solcast.
   declination) puts it at ~196.0° true -- a ~3.7° gap between the two,
   itself resting on the assumption that the house's walls are square
   and parallel to the roof/panel plane.
-- AppDaemon's HTTP component is enabled (confirmed by Predbat's own
-  dashboard already running on it), so `register_route` works for
+- AppDaemon's HTTP component is enabled -- confirmed directly in
+  `a0d7b954_appdaemon/appdaemon.yaml` itself (`http:`, `admin:`, `api:`
+  all declared there), not inferred from Predbat (see above: separate
+  add-on, tells you nothing about this one). `register_route` works for
   serving arbitrary responses with custom headers -- used for the
-  capture-download route (see Implementation status) instead of
-  needing SSH/Samba to retrieve data for local analysis.
+  capture-download route (see Implementation status) instead of needing
+  SSH/Samba to retrieve data for local analysis. Watch YAML indentation
+  under `http:` -- `url:` needs to nest one level deeper than `http:`
+  itself (4 spaces, not 2), or it silently becomes a stray sibling key
+  under `appdaemon:` instead of configuring the HTTP server.
 - Deployment gotcha #2: cloning the whole repo in-place (per the
   symlink fix above) means AppDaemon's dependency scanner tries to
   import *every* `.py` file it finds recursively under the apps
@@ -87,13 +103,27 @@ of) Solcast.
   `ModuleNotFoundError` for each on every file change, though it doesn't
   actually stop `sunknee_app.py` itself from working, since that only
   imports `sunknee.capture`/`sunknee.naive_knee`. Fix: add `tests` to
-  `exclude_dirs` in `appdaemon.yaml`'s top-level `appdaemon:` section
-  (applies to all apps sharing that config, harmless for Predbat).
+  `exclude_dirs` in `appdaemon.yaml`'s top-level `appdaemon:` section.
   `src/sunknee/diagnostics.py` hit the same scanner for its matplotlib
   import; fixed on the code side instead by moving that import inside
   `plot_day()` rather than the module top level, since matplotlib is
   needed by one file within a directory (`src/sunknee/`) we do need
   scanned -- `exclude_dirs` can't select individual files.
+  **Forward-looking caveat**: `exclude_dirs` matches on bare directory
+  *name* only, anywhere in the scanned tree, with no per-app scoping --
+  confirmed by reading AppDaemon's own `recursive_get_files()` (matches
+  `item.name in exclude`, not a path). A non-issue today (nothing else
+  shares `a0d7b954_appdaemon`'s apps directory), but if sunknee is ever
+  installed alongside other custom AppDaemon apps -- someone else's, or
+  a future HACS distribution -- and one of them has its own `tests`
+  directory that needs scanning, this setting would silently exclude
+  that too. The real fix would be a deploy step that copies only the
+  files actually needed (`apps/apps.yaml`, `apps/sunknee_app.py`,
+  `src/sunknee/*.py`) into the apps directory rather than cloning the
+  whole repo in-place, so `tests/`, docs, and `pyproject.toml` never
+  enter the scanned tree at all -- more moving parts than `git pull`,
+  not worth building for a single deployment, but worth revisiting
+  before any broader distribution.
 
 ### Output
 - Publish a forecast sensor via AppDaemon's `set_state` for tomorrow's
