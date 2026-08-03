@@ -74,6 +74,11 @@ of) Solcast.
   declination) puts it at ~196.0° true -- a ~3.7° gap between the two,
   itself resting on the assumption that the house's walls are square
   and parallel to the roof/panel plane.
+- AppDaemon's HTTP component is enabled (confirmed by Predbat's own
+  dashboard already running on it), so `register_route` works for
+  serving arbitrary responses with custom headers -- used for the
+  capture-download route (see Implementation status) instead of
+  needing SSH/Samba to retrieve data for local analysis.
 
 ### Output
 - Publish a forecast sensor via AppDaemon's `set_state` for tomorrow's
@@ -94,10 +99,13 @@ fitted curves) before committing to the estimator's internals.
   used both by the AppDaemon app and local tooling.
 - `apps/sunknee_app.py`: deployed AppDaemon app. Publishes a
   `sensor.sunknee_status` liveness sensor, listens to the Sigenergy PV
-  power sensor, writes/updates a per-day JSON capture file, and
-  publishes naive knee-time sensors (`sensor.sunknee_knee_morning` /
-  `_evening`) so the raw signal can be charted natively in HA without
-  anything extra installed there.
+  power sensor, writes/updates a per-day JSON capture file, publishes
+  naive knee-time sensors (`sensor.sunknee_knee_morning` / `_evening`,
+  monotonic rolling peak, and a same-day parabola-fit cross-check) so
+  the raw signal can be charted natively in HA without anything extra
+  installed there, and registers a `/app/sunknee_download` route that
+  zips the capture files with a download header -- pulls data to a
+  laptop for local analysis without SSH/Samba.
 - `src/sunknee/naive_knee.py`: placeholder threshold-crossing knee
   detector powering those HA sensors — explicitly not the real
   algorithm above (no direct/diffuse decomposition, no linear
@@ -143,36 +151,65 @@ This means naive "power crosses a noise-floor threshold" detection is
 biased late: the diffuse tail smears the observable transition past the
 true direct-cutoff you actually want for pose estimation.
 
-### Knee estimation: linear extrapolation of the direct component
-Rather than detecting the transition directly, fit and extrapolate:
+### Knee estimation: fit against the exact geometric model
+(Supersedes an earlier linear-extrapolation approach: fit a straight
+line to the steep, direct-dominated segment before the knee and
+extrapolate to its zero-crossing. That's only valid when the sun
+clears the horizon steeply enough that curvature is negligible next to
+slope — and that assumption degrades continuously with latitude and
+season, not as a hard cutoff. The sunrise/sunset crossing angle is
+roughly `(90° − latitude)` at the equinox and shallows further toward
+the local summer solstice, so the approximation is measurably worse
+exactly at the solstice (checked explicitly for ~56°N/Edinburgh:
+curvature there is real, not negligible). That's a real problem because
+solstice data is precisely what separates tilt from azimuth — seasonal
+spread is the whole point (see Primary signal above) — so the linear
+method's error was worst on the observations most worth trusting.
+Rejected fix: a locally-fit parabola or sinusoid chosen by
+latitude/season — requires picking the right local approximation order
+per deployment rather than one method correct everywhere, and still
+breaks down at extreme cases (a hypothetical polar panel: the knee can
+be tangential — curve touches zero and turns back without a
+transversal sign change — locally quadratic there, not sinusoidal, so
+even "parabola vs. sinusoid" isn't a clean choice across cases).
 
-1. Take a rough changepoint estimate first (slope-based, e.g. where the
-   derivative shifts from steep to shallow) to bound a candidate window.
-2. Fit a straight line to the steep, direct-dominated segment of the
-   curve just before that changepoint.
-3. Extrapolate the line to its zero-crossing — that x-intercept is the
-   knee estimate.
+Resolution: don't locally approximate the curve shape at all. Fit the
+observed power directly against the **exact `pvlib`-predicted curve**
+for a candidate (tilt, azimuth) — compute true solar position and the
+resulting cos(AOI)(t) via `pvlib.solarposition`, and regress observed
+power against that exact shape. This sidesteps the
+linear-vs-quadratic-vs-sinusoidal question entirely: the same method is
+valid at the equinox, at the solstice, and (for free, though out of
+scope to actively target) at extreme latitudes.
 
-This works because near AOI=90°, cos(AOI) is locally linear in angle
-(derivative of cosine is maximal there), and solar angular motion is
-smooth over a short window, so direct-component power is close to
-linear in time just before the true knee. The zero-crossing is
-determined by the line's slope and position, not its height — so
-day-to-day DNI magnitude noise (haze, thin cloud) mostly changes the
-line's steepness and only weakly perturbs where it crosses zero. This
-gives meaningfully lower variance per-day than waiting for power to
-visibly hit a threshold.
+**Fitting against asymmetric noise**: cloud interference isn't
+symmetric around the clear-sky curve — dropouts (attenuation) are
+frequent and can be large; overshoot (cloud-edge enhancement, inverter
+clipping) is occasional and small. Ordinary least squares weights both
+directions equally and gets pulled down toward the dropouts. Use
+**quantile regression** instead (pinball loss: `τ·r` for `r>0`,
+`(τ−1)·r` for `r<0`), with τ set high (~0.7–0.9, tunable) to penalize
+dropouts far more than overshoot, pulling the fit toward the upper
+envelope rather than averaging through the gaps. Specifically the
+smoothed variant, **quantile Huber loss** (quadratic within a small
+window κ around zero) — stays differentiable everywhere, unlike plain
+pinball loss's kink at zero, so gradient-based optimizers behave
+sensibly. Not a novel choice: it's the same mechanism the SCSF
+follow-on decomposition work (cited below) uses for its clear-sky
+component, τ hand-tuned around 0.65.
+
+**Unification**: the envelope/baseline-curve fit (below) faces the
+identical asymmetric-noise problem, so both should share one
+quantile-Huber regression routine applied to different target curves,
+rather than two bespoke implementations.
 
 Practical notes:
-- Iterate: rough changepoint bounds the fit window, linear fit run
-  within it, then re-extrapolate — self-correcting rather than circular.
-- Needs a handful of samples with non-trivial direct signal in the
-  window, not a clean view of the knee itself.
+- Needs a handful of samples with non-trivial direct signal, not a
+  clean view of the knee itself — the fit is against the whole
+  candidate curve shape, not just a local window around the crossing.
 - Sensor resolution matters here: worth checking empirically whether
   the Sigenergy sensor's interval (and any inverter-side MPPT smoothing)
-  gives enough points in the linear segment to fit well, or whether the
-  window needs widening (at the cost of more diffuse contamination) to
-  get enough data.
+  gives enough points to fit well.
 
 ### Separating shading signal from pose signal
 Shading can only push an *observed* knee inward relative to the true
@@ -180,7 +217,7 @@ unobstructed geometric knee (later mornings, earlier evenings) — never
 outward. This gives a clean way to distinguish "this knee is telling me
 about panel pose" from "this knee is telling me about an obstruction":
 
-- Track knee times per day using the extrapolation method above.
+- Track knee times per day using the geometric-model fit above.
 - Take the extremum (earliest morning, latest evening) across a rolling
   window, using a percentile (e.g. 90–95th) rather than literal min/max
   to reject noise the same way the amplitude-envelope approach rejects
@@ -212,12 +249,47 @@ single clean day:
   the "Statistical Clear Sky Fitting" (SCSF) method (Meyers et al.,
   arXiv:1907.08279) generalises this — model-agnostic, resilient to
   shading, no irradiance sensor required.
+- Faces the same asymmetric-noise problem as knee estimation above
+  (dropouts frequent/large, overshoot occasional/small) — fitting the
+  clear-sky-like reference should reuse the same quantile-Huber
+  regression routine rather than a second bespoke implementation.
 
 ### State update over time
 Recursive least squares or a Kalman filter, state = [tilt, azimuth],
 updated once per usable day (either a knee-time observation or an
 envelope-fit observation). Converges over weeks, damps single-day noise
 (one dirty panel, a bird incident, a single bad fit).
+
+Use an **adaptive (heteroscedastic) filter**: rather than a fixed
+measurement-noise assumption, set the measurement noise covariance R
+per day, so a bad day's observation naturally gets a small Kalman gain
+(barely moves the state) without a separate hand-built confidence score
+or ad hoc accept/reject gate bolted on top. Two inputs to R, meant to
+combine rather than choose between:
+
+1. **Cheap pre-gate: clear-sky index (kt).** `kt` = measured power ÷
+   modelled clear-sky power for that time/date (`pvlib`'s clear-sky
+   model — already needed for the geometric fit above), averaged over
+   the midday window. Below some threshold (persistent kt ~0.3–0.4, the
+   London-October case), skip the day outright — R effectively
+   infinite, don't run the regression at all. Cheaper than always
+   fitting and hoping the covariance saves you, and avoids the
+   regression occasionally producing a spurious confident-looking fit
+   to what's actually just diffuse-dominated noise.
+2. **Fit covariance for days that pass the gate.** The quantile-Huber
+   regression's parameter covariance at its optimum (from the Hessian
+   at convergence, or a quick bootstrap) directly gives the day's
+   observation uncertainty — a shallow, noisy fit through weak signal
+   produces wide covariance; a clean fit through a proper direct-
+   component curve produces tight covariance. This is the actual
+   statistical uncertainty of the observation, not a heuristic score,
+   and maps directly onto R with no extra invented metric needed.
+
+Net effect: clear summer days pull the tilt/azimuth estimate hard;
+persistently overcast days (London in October) either get skipped by
+the kt gate or contribute almost nothing via a wide covariance — both
+doing the "don't influence the pose estimate" job, arrived at from the
+filter's own machinery rather than a bolted-on rule.
 
 ### Stretch goal: horizon profile from power data
 A horizon profile (azimuth/elevation pairs describing the site's
@@ -240,8 +312,8 @@ project can derive the same artifact from power data alone:
   working, not alongside it.
 
 ### Note on upstream contribution
-The linear-extrapolation knee method and the power-derived horizon
-profile are novel enough that they *could* theoretically interest `pvanalytics` maintainers, but contributing to a scientific-computing library requires a level of domain confidence and review-readiness this project isn't aiming for — solar engineering isn't the core expertise here, this is a personal tool built for one system. Not a planned direction; noted only so it's not forgotten if the method ever proves unusually solid.
+The exact-geometric-model knee-fitting method and the power-derived
+horizon profile are novel enough that they *could* theoretically interest `pvanalytics` maintainers, but contributing to a scientific-computing library requires a level of domain confidence and review-readiness this project isn't aiming for — solar engineering isn't the core expertise here, this is a personal tool built for one system. Not a planned direction; noted only so it's not forgotten if the method ever proves unusually solid.
 
 
 ## Prior art / references
