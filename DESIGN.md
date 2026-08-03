@@ -38,7 +38,17 @@ of) Solcast.
   own setup (its dashboard being reachable, say) is evidence about
   sunknee's AppDaemon instance specifically. `pvlib` installs via
   AppDaemon's `python_packages` config, no new infra needed.
-- PV generation sensor comes from the Sigenergy Modbus HA integration.
+- PV generation sensor comes from the Sigenergy Modbus HA integration,
+  and reports in **kW**, not W (`sensor.sigen_inverter_pv_power`, max
+  ~5.4 in real captured data). sunknee now reads the entity's
+  `unit_of_measurement` at startup and converts to real watts at
+  ingestion (`sunknee.capture.watts_multiplier`) -- before this fix,
+  `knee_threshold_w: 10` never triggered against kW-scale values (max
+  5.4 < 10), so `sensor.sunknee_knee_morning`/`_evening` had silently
+  never populated since deployment, and the peak-power sensors were
+  numerically fine but tagged `unit_of_measurement: "W"` while actually
+  holding kW-scale numbers (1000x mislabeled). Capture files from before
+  this fix (2026-08-01 to 2026-08-03) are in the old, unconverted scale.
 - HA recorder purges detailed history after `purge_keep_days` (default
   10 days) — **increase this now** so full-resolution data accumulates
   going forward; don't rely on it for backfill beyond a couple of weeks.
@@ -91,10 +101,24 @@ of) Solcast.
   add-on, tells you nothing about this one). `register_route` works for
   serving arbitrary responses with custom headers -- used for the
   capture-download route (see Implementation status) instead of needing
-  SSH/Samba to retrieve data for local analysis. Watch YAML indentation
-  under `http:` -- `url:` needs to nest one level deeper than `http:`
-  itself (4 spaces, not 2), or it silently becomes a stray sibling key
-  under `appdaemon:` instead of configuring the HTTP server.
+  SSH/Samba to retrieve data for local analysis. `http:` (like `admin:`,
+  `api:`, `hadashboard:`) must be a **top-level** key, a sibling of
+  `appdaemon:` -- not nested inside it. Nesting it there doesn't crash
+  anything (AppDaemon logs `Extra config field 'http'. This will be
+  ignored` and falls back to the default port anyway), but the
+  configured `url:` silently has no effect either.
+- The AppDaemon add-on's port being correctly published to the host
+  (Settings -> Add-ons -> AppDaemon -> Network, confirmed 5050 -> 5050)
+  wasn't the actual blocker it looked like -- `homeassistant.local`
+  resolves to both an IPv4 and an IPv6 link-local address, and the
+  IPv6 one connects (TCP handshake succeeds) but then resets with zero
+  response bytes for *any* path, not just the download route (verified
+  by hitting AppDaemon's own built-in `/aui/index.html` and getting the
+  identical failure). Forcing IPv4 (`curl -4`, or targeting the LAN IP
+  directly) works cleanly. Root cause not chased further (probably
+  router/mDNS advertising an IPv6 address Docker's port-publishing can't
+  actually route to) -- `sunknee.pull` forces IPv4 by resolving the host
+  itself rather than leaving it to default dual-stack ordering.
 - Deployment gotcha #2: cloning the whole repo in-place (per the
   symlink fix above) means AppDaemon's dependency scanner tries to
   import *every* `.py` file it finds recursively under the apps

@@ -11,11 +11,22 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+WATTS_PER_UNIT = {"W": 1.0, "kW": 1_000.0, "MW": 1_000_000.0}
+
+
+def watts_multiplier(unit: str | None) -> float:
+    """Conversion factor to real watts for a HA power sensor's
+    unit_of_measurement. Falls back to 1.0 (assume already watts) for
+    unrecognised/missing units -- callers should log a warning in that
+    case, since silently assuming watts for an unknown unit could be
+    wrong."""
+    return WATTS_PER_UNIT.get(unit, 1.0)
+
 
 @dataclass
 class Reading:
     timestamp: str  # ISO 8601, as received from HA
-    watts: float
+    watts: float  # always real watts -- see watts_multiplier for HA-unit conversion
 
 
 @dataclass

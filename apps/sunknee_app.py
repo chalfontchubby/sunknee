@@ -33,7 +33,7 @@ from aiohttp import web
 from appdaemon.plugins.hass.hassapi import Hass
 
 from sunknee import __version__
-from sunknee.capture import DayCapture, Reading
+from sunknee.capture import DayCapture, Reading, watts_multiplier
 from sunknee.naive_knee import RollingPeakTracker, fit_peak, naive_knee_indices
 
 STATUS_ENTITY = "sensor.sunknee_status"
@@ -56,6 +56,15 @@ class SunKnee(Hass):
         self.peak_window = int(self.args.get("peak_window", 40))
         self.fit_min_points = int(self.args.get("fit_min_points", 30))
 
+        source_unit = self.get_state(self.pv_power_entity, attribute="unit_of_measurement")
+        self.watts_multiplier = watts_multiplier(source_unit)
+        if source_unit not in ("W", "kW", "MW"):
+            self.log(
+                f"{self.pv_power_entity} has unrecognised unit_of_measurement "
+                f"{source_unit!r} -- assuming it's already watts, may be wrong",
+                level="WARNING",
+            )
+
         self.capture = self._load_or_start_capture(self._today())
         self._reset_peak_tracker()
 
@@ -66,10 +75,15 @@ class SunKnee(Hass):
                 "friendly_name": "sunknee status",
                 "version": __version__,
                 "pv_power_entity": self.pv_power_entity,
+                "source_unit": source_unit,
+                "watts_multiplier": self.watts_multiplier,
             },
             check_existence=False,
         )
-        self.log(f"sunknee {__version__} started, watching {self.pv_power_entity}")
+        self.log(
+            f"sunknee {__version__} started, watching {self.pv_power_entity} "
+            f"({source_unit} -> watts multiplier {self.watts_multiplier})"
+        )
 
         self.listen_state(self._on_power_change, self.pv_power_entity)
         self.register_route(self._download_capture, "sunknee_download")
@@ -97,7 +111,7 @@ class SunKnee(Hass):
 
     def _on_power_change(self, entity, attribute, old, new, **kwargs):
         try:
-            watts = float(new)
+            watts = float(new) * self.watts_multiplier
         except (TypeError, ValueError):
             return  # "unknown"/"unavailable" states etc.
 
