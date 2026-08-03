@@ -79,6 +79,21 @@ of) Solcast.
   serving arbitrary responses with custom headers -- used for the
   capture-download route (see Implementation status) instead of
   needing SSH/Samba to retrieve data for local analysis.
+- Deployment gotcha #2: cloning the whole repo in-place (per the
+  symlink fix above) means AppDaemon's dependency scanner tries to
+  import *every* `.py` file it finds recursively under the apps
+  directory -- not just the one `sunknee_app.py` references -- including
+  `tests/*.py` (needs `pytest`, not installed on the Pi). Logs a
+  `ModuleNotFoundError` for each on every file change, though it doesn't
+  actually stop `sunknee_app.py` itself from working, since that only
+  imports `sunknee.capture`/`sunknee.naive_knee`. Fix: add `tests` to
+  `exclude_dirs` in `appdaemon.yaml`'s top-level `appdaemon:` section
+  (applies to all apps sharing that config, harmless for Predbat).
+  `src/sunknee/diagnostics.py` hit the same scanner for its matplotlib
+  import; fixed on the code side instead by moving that import inside
+  `plot_day()` rather than the module top level, since matplotlib is
+  needed by one file within a directory (`src/sunknee/`) we do need
+  scanned -- `exclude_dirs` can't select individual files.
 
 ### Output
 - Publish a forecast sensor via AppDaemon's `set_state` for tomorrow's

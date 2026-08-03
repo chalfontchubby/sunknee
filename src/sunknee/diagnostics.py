@@ -4,6 +4,15 @@ naive placeholder knee marker.
 Requires the `diagnostics` dependency group (matplotlib) -- not
 installed on the AppDaemon/HA side, and not imported by apps/sunknee_app.py.
 Run via `uv run sunknee-plot <capture.json>`.
+
+matplotlib is imported lazily inside plot_day(), not at module level:
+AppDaemon's own dependency scanner tries to import every .py file it
+finds recursively under the apps directory (since the whole repo is
+cloned in-place there, not just the deployable subset -- see DESIGN.md's
+symlink-import-path note), including this file, even though
+sunknee_app.py never imports it. A module-level import would make that
+scan fail with ModuleNotFoundError on the Pi, where matplotlib isn't
+installed.
 """
 from __future__ import annotations
 
@@ -12,13 +21,13 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-
 from sunknee.capture import DayCapture
 from sunknee.naive_knee import naive_knee_indices
 
 
 def plot_day(capture: DayCapture, out_path: Path, threshold_w: float = 10.0) -> None:
+    import matplotlib.pyplot as plt
+
     times = [datetime.fromisoformat(r.timestamp) for r in capture.readings]
     watts = [r.watts for r in capture.readings]
 

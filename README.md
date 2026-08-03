@@ -88,19 +88,26 @@ captured data.
    itself (`apps/sunknee` → `../src/sunknee`) is fine, since that's
    resolved by Python's own import machinery once the containing
    directory is already on `sys.path`, not by AppDaemon's walk.
-2. Edit `apps/apps.yaml` and set `pv_power_entity` to your Sigenergy PV
+2. Add `tests` to `exclude_dirs` in `appdaemon.yaml`'s top-level
+   `appdaemon:` section. Cloning the whole repo in-place means
+   AppDaemon's dependency scanner tries to import every `.py` file it
+   finds recursively, including `tests/*.py` (needs `pytest`, not
+   installed on the Pi) — logs a `ModuleNotFoundError` on every file
+   change otherwise. Harmless to `sunknee_app.py` itself either way
+   (it never imports the test files), but noisy.
+3. Edit `apps/apps.yaml` and set `pv_power_entity` to your Sigenergy PV
    power sensor's real entity_id.
-3. AppDaemon hot-reloads on file changes. Check HA for
+4. AppDaemon hot-reloads on file changes. Check HA for
    `sensor.sunknee_status` (should read `running` — the hello-world
    liveness check) and, once there's daylight data,
    `sensor.sunknee_knee_morning` / `sensor.sunknee_knee_evening`. If it
    doesn't show up, check the add-on's own log (Settings → Add-ons →
    AppDaemon → Log tab, or `ha addons logs <slug>_appdaemon`) — that's
    separate from Settings → System → Logs, which only covers HA core.
-4. Capture JSON lands in `export_dir` (default
+5. Capture JSON lands in `export_dir` (default
    `/config/apps/sunknee/data/YYYY-MM-DD.json`) inside the AppDaemon
    container, one file per day, updated on every sensor reading.
-5. To pull that data down for local analysis without SSH: visit
+6. To pull that data down for local analysis without SSH: visit
    `http://<appdaemon-host>:<appdaemon-http-port>/app/sunknee_download`
    in a browser (or `curl -O -J <that URL>`) — it zips every captured
    day and serves it with a download header, straight to your
@@ -108,7 +115,7 @@ captured data.
    The port is whatever `http:` is configured to in your `appdaemon.yaml`
    (Predbat's own dashboard already proves this is enabled). Unzip
    locally and run `sunknee-plot` against whichever day you want.
-6. Updates: `cd /addon_configs/<slug>_appdaemon/apps/sunknee && git pull`.
+7. Updates: `cd /addon_configs/<slug>_appdaemon/apps/sunknee && git pull`.
 
 ## License
 
