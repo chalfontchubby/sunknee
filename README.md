@@ -47,10 +47,10 @@ forecast sources for comparison and drift detection.
 
 - `src/sunknee/` — the importable package. Currently: a stdlib-only
   `capture` data model and `naive_knee` placeholder detector (both safe
-  to run on the AppDaemon/HA side), matplotlib-based `diagnostics`
-  (local-only, `diagnostics` dependency group), and unimplemented stubs
-  (`knee`, `envelope`, `estimator`) for the real algorithm from
-  [`DESIGN.md`](./DESIGN.md).
+  to run on the AppDaemon/HA side), matplotlib-based `diagnostics` and
+  `pull` (both local-only, `diagnostics` dependency group), and
+  unimplemented stubs (`knee`, `envelope`, `estimator`) for the real
+  algorithm from [`DESIGN.md`](./DESIGN.md).
 - `apps/` — what actually gets deployed to AppDaemon: `apps.yaml` +
   `sunknee_app.py` (the `Hass` app) + a symlinked copy of
   `src/sunknee` so the app can `import sunknee` without needing the
@@ -63,15 +63,35 @@ uv sync --group dev --group diagnostics
 uv run pytest
 ```
 
-Once you have a capture export (see below), plot it:
+Pull capture data down from the deployed app and plot every day found,
+in one step:
+
+```
+uv run sunknee-pull
+```
+
+Defaults to `homeassistant.local:5050`, unpacking into `./data/`
+(gitignored) and plotting each day. Override with `--host`, `--port`,
+`--data-dir`, or skip plotting with `--no-plot` -- see `sunknee-pull
+--help`. Forces IPv4 itself (see DESIGN.md's environment notes for why
+that matters on this network).
+
+Add `--and-clear` to also delete completed-day capture files on the Pi
+once they're safely zipped (bounds storage growth there; today's
+still-in-progress file is never touched). This is a one-way trip: the
+delete happens on the Pi as part of serving the same download, before
+you've actually received the bytes, so only use it once you trust the
+connection.
+
+To plot a single already-downloaded file instead:
 
 ```
 uv run sunknee-plot path/to/2026-07-31.json
 ```
 
-This currently marks the naive threshold-based knee, not the real
-geometric estimate (not built yet) — just enough to sanity-check
-captured data.
+Either way, this currently marks the naive threshold-based knee, not
+the real geometric estimate (not built yet) — just enough to
+sanity-check captured data.
 
 ## Deploying to AppDaemon
 
@@ -107,14 +127,16 @@ captured data.
 5. Capture JSON lands in `export_dir` (default
    `/config/apps/sunknee/data/YYYY-MM-DD.json`) inside the AppDaemon
    container, one file per day, updated on every sensor reading.
-6. To pull that data down for local analysis without SSH: visit
-   `http://<appdaemon-host>:<appdaemon-http-port>/app/sunknee_download`
-   in a browser (or `curl -O -J <that URL>`) — it zips every captured
-   day and serves it with a download header, straight to your
-   Downloads folder, the same way Predbat's debug-info download works.
-   The port is whatever `http:` is configured to in your `appdaemon.yaml`
-   (Predbat's own dashboard already proves this is enabled). Unzip
-   locally and run `sunknee-plot` against whichever day you want.
+6. To pull that data down for local analysis without SSH: run
+   `uv run sunknee-pull` (see "Local development" above) — it downloads
+   the same zip a browser would get from
+   `http://<appdaemon-host>:<appdaemon-http-port>/app/sunknee_download`,
+   unpacks it, and plots every day in one step. The port is whatever
+   `http:` is configured to (top-level, a sibling of `appdaemon:` — see
+   DESIGN.md's environment notes for a config gotcha there) in your
+   `appdaemon.yaml`. If pulling manually with a browser or `curl`
+   instead, watch for a possible IPv6-vs-IPv4 issue (also in DESIGN.md)
+   — `sunknee-pull` forces IPv4 itself so this shouldn't bite there.
 7. Updates: `cd /addon_configs/<slug>_appdaemon/apps/sunknee && git pull`.
 
 ## License

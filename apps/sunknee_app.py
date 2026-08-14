@@ -33,7 +33,7 @@ from aiohttp import web
 from appdaemon.plugins.hass.hassapi import Hass
 
 from sunknee import __version__
-from sunknee.capture import DayCapture, Reading, watts_multiplier
+from sunknee.capture import DayCapture, Reading, completed_day_files, watts_multiplier
 from sunknee.naive_knee import RollingPeakTracker, fit_peak, naive_knee_indices
 
 STATUS_ENTITY = "sensor.sunknee_status"
@@ -192,11 +192,27 @@ class SunKnee(Hass):
         directly, unlike the sync-friendly listen_state/set_state
         calls elsewhere in this app), but the zipping itself is plain
         sync file I/O -- fine for an occasional, manually-triggered call.
+
+        ?delete=true opts into deleting completed days from the Pi right
+        after zipping them, to bound storage growth -- today's file is
+        never touched (see completed_day_files). This is a deliberate
+        trade-off, not a default: the delete happens as part of building
+        this same response, before the client has actually received the
+        bytes, so a connection that drops mid-transfer means the source
+        files are already gone despite an incomplete download. Only use
+        it once you trust the round-trip (sunknee-pull --and-clear).
         """
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             for path in sorted(self.export_dir.glob("*.json")):
                 zf.write(path, arcname=path.name)
+
+        if request.query.get("delete") == "true":
+            to_delete = completed_day_files(self.export_dir, self._today())
+            for path in to_delete:
+                path.unlink()
+            self.log(f"Deleted {len(to_delete)} completed-day capture file(s) after download")
+
         return web.Response(
             body=buffer.getvalue(),
             content_type="application/zip",

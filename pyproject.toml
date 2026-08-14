@@ -8,6 +8,7 @@ dependencies = []
 
 [project.scripts]
 sunknee-plot = "sunknee.diagnostics:main"
+sunknee-pull = "sunknee.pull:main"
 
 [dependency-groups]
 dev = [

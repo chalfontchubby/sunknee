@@ -184,13 +184,38 @@ fitted curves) before committing to the estimator's internals.
   curve with the naive knee markers.
 - `src/sunknee/knee.py`, `envelope.py`, `estimator.py`: unimplemented
   stubs for the real algorithm described above — not started yet.
+- Storage on the Pi is unbounded for now: real captured data runs
+  ~450KB-800KB/day of raw JSON (measured from the first 3 days), which
+  adds up over months but isn't urgent. `/app/sunknee_download?delete=true`
+  (`sunknee-pull --and-clear`) opts into deleting completed days after
+  zipping them -- never touches today's file (still being actively
+  written; deleting it wouldn't even save space, since the next reading
+  rewrites it in full from the in-memory capture regardless, and risks
+  losing the rest of the day if nothing triggers a re-save before
+  midnight). The delete happens server-side as part of the same request
+  that serves the zip, before the client has actually received the
+  bytes -- a deliberate simplicity/safety trade-off (one round-trip, but
+  a dropped connection mid-transfer means the source is gone despite an
+  incomplete download), opt-in rather than default for that reason.
+  Gzipping each day's file at rest (not just the download zip) would
+  recover a lot of that footprint and isn't hard, but not worth building
+  until it's actually a problem.
 
 ### Open decisions for implementation
 - Storage: SQLite vs. flat JSON for the rolling data store (avoid
   depending on HA recorder for anything beyond ~2 weeks). The capture
   export format above (per-day JSON) is the debug/diagnostics facility,
   not necessarily this decision — the estimator's own rolling state
-  store is still open.
+  store is still open. Worth keeping in mind these are different
+  lifetimes: full per-reading raw capture is only needed during this
+  diagnostics-before-algorithm phase, to have real data to develop
+  against locally. Once the real estimator exists and processes each
+  day's data once (extracting a knee-time or envelope observation, then
+  updating the Kalman state), the Pi shouldn't need to retain raw
+  per-day captures indefinitely at all -- only the estimator's own
+  compact state (fit parameters, drift history) needs to persist
+  long-term. The delete-after-download option above is a stopgap for
+  now, not the intended steady-state shape of the system.
 - Whether to implement knee-detection and envelope-fitting as two
   independent estimators feeding one Kalman update, or a single combined
   cost function.

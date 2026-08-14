@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from sunknee.capture import DayCapture, Reading, watts_multiplier
+from sunknee.capture import DayCapture, Reading, completed_day_files, watts_multiplier
 
 
 def test_watts_multiplier_known_units():
@@ -29,3 +29,16 @@ def test_round_trip_json(tmp_path: Path):
     loaded = DayCapture.load(path)
 
     assert loaded == capture
+
+
+def test_completed_day_files_excludes_today(tmp_path: Path):
+    for day in ("2026-07-30", "2026-07-31", "2026-08-01"):
+        (tmp_path / f"{day}.json").write_text("{}")
+
+    result = completed_day_files(tmp_path, today="2026-08-01")
+
+    assert [p.name for p in result] == ["2026-07-30.json", "2026-07-31.json"]
+
+
+def test_completed_day_files_empty_dir(tmp_path: Path):
+    assert completed_day_files(tmp_path, today="2026-08-01") == []

@@ -63,3 +63,14 @@ class DayCapture:
     @classmethod
     def load(cls, path: Path) -> DayCapture:
         return cls.from_json(Path(path).read_text())
+
+
+def completed_day_files(export_dir: Path, today: str) -> list[Path]:
+    """Capture JSON files in export_dir safe to delete once downloaded --
+    every day except today's, which is excluded unconditionally. Today's
+    file is still being actively written (a new reading rewrites it in
+    full from the in-memory capture, regardless of whether the file on
+    disk was just deleted), so deleting it doesn't even save space, and
+    risks losing the rest of the day's data outright if no further
+    reading arrives before midnight to trigger a re-save."""
+    return sorted(p for p in export_dir.glob("*.json") if p.stem != today)
