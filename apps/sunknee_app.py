@@ -65,7 +65,7 @@ class SunKnee(Hass):
                 level="WARNING",
             )
 
-        self.capture = self._load_or_start_capture(self._today())
+        self.capture = self._load_or_start_capture(self._today(self.get_now()))
         self._reset_peak_tracker()
 
         self.set_state(
@@ -88,8 +88,18 @@ class SunKnee(Hass):
         self.listen_state(self._on_power_change, self.pv_power_entity)
         self.register_route(self._download_capture, "sunknee_download")
 
-    def _today(self) -> str:
-        return self.get_now().strftime("%Y-%m-%d")
+    def _today(self, now) -> str:
+        """now must already be resolved by the caller -- self.get_now()
+        behaves differently depending on the calling thread (see
+        DESIGN.md's environment notes): called synchronously from a
+        worker thread (initialize()/_on_power_change(), both sync) it
+        blocks and returns the real datetime; called the same way from
+        an async method already running on the main thread's event loop
+        (_download_capture()) it instead hands back an un-awaited
+        asyncio.Task. Taking `now` as a parameter forces every call site
+        to resolve it the right way for its own context rather than
+        this helper silently doing the wrong thing in one of them."""
+        return now.strftime("%Y-%m-%d")
 
     def _capture_path(self, day: str) -> Path:
         return self.export_dir / f"{day}.json"
@@ -115,12 +125,13 @@ class SunKnee(Hass):
         except (TypeError, ValueError):
             return  # "unknown"/"unavailable" states etc.
 
-        today = self._today()
+        now = self.get_now()
+        today = self._today(now)
         if today != self.capture.date:
             self.capture = self._load_or_start_capture(today)
             self._reset_peak_tracker()
 
-        reading = Reading(timestamp=self.get_now().isoformat(), watts=watts)
+        reading = Reading(timestamp=now.isoformat(), watts=watts)
         self.capture.readings.append(reading)
         self.capture.save(self._capture_path(self.capture.date))
 
@@ -208,7 +219,8 @@ class SunKnee(Hass):
                 zf.write(path, arcname=path.name)
 
         if request.query.get("delete") == "true":
-            to_delete = completed_day_files(self.export_dir, self._today())
+            now = await self.get_now()
+            to_delete = completed_day_files(self.export_dir, self._today(now))
             for path in to_delete:
                 path.unlink()
             self.log(f"Deleted {len(to_delete)} completed-day capture file(s) after download")

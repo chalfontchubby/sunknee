@@ -107,6 +107,26 @@ of) Solcast.
   anything (AppDaemon logs `Extra config field 'http'. This will be
   ignored` and falls back to the default port anyway), but the
   configured `url:` silently has no effect either.
+- Sharp edge in `register_route` callbacks specifically: AppDaemon's
+  sync-friendly API methods (`get_now()`, etc.) are `@sync_decorator`-
+  wrapped so plain sync app code can call them as if they were regular
+  synchronous methods. That wrapper checks which thread it's running
+  on: from a worker thread (any plain `def` callback -- `initialize()`,
+  `_on_power_change()`) it blocks and returns the real result via
+  `run_coroutine_threadsafe`; from the *main* thread -- which is where
+  `register_route`'s `async def` callbacks actually run, dispatched
+  directly on AppDaemon's own HTTP event loop -- it instead does
+  `asyncio.create_task(coro)` and hands back the **un-awaited Task
+  object**, not the result. Calling `self.get_now()` the same way from
+  inside `_download_capture` silently returned a Task instead of a
+  datetime (`AttributeError: '_asyncio.Task' object has no attribute
+  'strftime'`), and because AppDaemon's own `get_web_response` error
+  helper doesn't set the actual HTTP status code on its response
+  (embeds it in the HTML body text only), the client saw a misleading
+  plain `200 OK` instead of anything flagging a server error. Fix: from
+  an async route callback, `await self.get_now()` explicitly rather
+  than relying on the sync wrapper's implicit behaviour -- a Task is
+  itself awaitable, so this works cleanly once done deliberately.
 - The AppDaemon add-on's port being correctly published to the host
   (Settings -> Add-ons -> AppDaemon -> Network, confirmed 5050 -> 5050)
   wasn't the actual blocker it looked like -- `homeassistant.local`
@@ -118,7 +138,12 @@ of) Solcast.
   directly) works cleanly. Root cause not chased further (probably
   router/mDNS advertising an IPv6 address Docker's port-publishing can't
   actually route to) -- `sunknee.pull` forces IPv4 by resolving the host
-  itself rather than leaving it to default dual-stack ordering.
+  itself rather than leaving it to default dual-stack ordering. One
+  layer deeper than expected, though: passing `family=AF_INET` into
+  `socket.getaddrinfo()` itself fails outright for `.local` mDNS names
+  on macOS (`ping`, which doesn't restrict family, works fine) --
+  `resolve_ipv4()` queries unrestricted and filters the results in
+  Python instead of restricting the query.
 - Deployment gotcha #2: cloning the whole repo in-place (per the
   symlink fix above) means AppDaemon's dependency scanner tries to
   import *every* `.py` file it finds recursively under the apps

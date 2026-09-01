@@ -34,9 +34,20 @@ DEFAULT_DATA_DIR = Path("data")
 
 
 def resolve_ipv4(host: str) -> str:
-    """First IPv4 address for host, bypassing IPv6 entirely."""
-    infos = socket.getaddrinfo(host, None, socket.AF_INET)
-    return infos[0][4][0]
+    """First IPv4 address for host, bypassing IPv6 entirely.
+
+    Queries unrestricted (no family filter) and filters the results in
+    Python, rather than passing family=AF_INET into getaddrinfo()
+    itself: on macOS, forcing AF_INET at the C level fails outright for
+    .local mDNS names (a resolver quirk -- `ping` works because it
+    doesn't restrict the family either) even when an IPv4 address
+    genuinely exists among the unrestricted results.
+    """
+    infos = socket.getaddrinfo(host, None)
+    for family, _, _, _, sockaddr in infos:
+        if family == socket.AF_INET:
+            return sockaddr[0]
+    raise OSError(f"No IPv4 address found for {host!r}")
 
 
 def download_capture_zip(
