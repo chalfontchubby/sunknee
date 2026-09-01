@@ -65,6 +65,29 @@ class DayCapture:
         return cls.from_json(Path(path).read_text())
 
 
+def plausible_readings(
+    readings: list[Reading], max_watts: float | None
+) -> list[Reading]:
+    """Readings with watts <= max_watts -- a cheap sanity filter against
+    sensor/Modbus glitches, applied at every point derived signals
+    (RollingPeakTracker, naive_knee_indices, fit_peak, the HA sensors)
+    get computed from. Returns readings unchanged if max_watts is None.
+
+    Real over-nameplate output happens (cloud-edge irradiance
+    enhancement -- see DESIGN.md) but is modest, a few percent, not a
+    multiple -- a reading at 2x a known inverter's rated capacity,
+    especially late in the day when output should be declining rather
+    than doubling, is far more likely a data-quality artifact than
+    genuine generation. Deliberately doesn't touch the stored capture
+    itself (readings are still appended/saved raw) -- only what
+    downstream analysis sees, so the anomaly stays visible in the raw
+    record for later debugging instead of silently vanishing.
+    """
+    if max_watts is None:
+        return readings
+    return [r for r in readings if r.watts <= max_watts]
+
+
 def completed_day_files(export_dir: Path, today: str) -> list[Path]:
     """Capture JSON files in export_dir safe to delete once downloaded --
     every day except today's, which is excluded unconditionally. Today's

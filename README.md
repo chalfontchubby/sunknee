@@ -96,7 +96,9 @@ sanity-check captured data.
 `sunknee-pull` also generates `data/summary.png` automatically (skip
 with `--no-summary`) — knee/peak/fit times and watts plotted day-to-day
 across everything in the directory, for watching trends build up over
-weeks. Regenerate it on its own with `uv run sunknee-summary ./data`.
+weeks, plus a confidence panel (peak-relative-to-best-seen and fit
+residual, kept separate since they catch different failure modes — see
+DESIGN.md). Regenerate it on its own with `uv run sunknee-summary ./data`.
 
 ## Deploying to AppDaemon
 

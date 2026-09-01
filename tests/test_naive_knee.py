@@ -115,6 +115,32 @@ def test_fit_peak_recovers_exact_parabola_vertex():
     assert fit["fit_peak_watts"] == pytest.approx(2000.0, abs=1e-6)
     expected_at = (base + timedelta(minutes=100.0)).isoformat()
     assert fit["fit_peak_at"] == expected_at
+    # Exact data, no noise -- the fit should agree with it almost exactly.
+    assert fit["fit_rms_residual"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_fit_peak_rms_residual_reflects_actual_scatter():
+    x_values = list(range(0, 201, 2))
+    series, _ = _parabola_series(x_values, vertex_x=100.0, vertex_watts=2000.0)
+
+    # Alternate residuals above/below the true curve by a known amount --
+    # a "clean but scattered" day, not a shape mismatch. tau=0.5 (plain
+    # symmetric loss) so the fit sits at the midpoint and the RMS
+    # residual comes out exactly at the noise amplitude -- tau=0.9 (the
+    # default) deliberately doesn't split symmetric noise symmetrically,
+    # since it's pulled toward the upper points on purpose.
+    noisy = [
+        (t, w + (50.0 if i % 2 == 0 else -50.0))
+        for i, (t, w) in enumerate(series)
+    ]
+
+    clean_fit = fit_peak(series, min_points=30, tau=0.5)
+    noisy_fit = fit_peak(noisy, min_points=30, tau=0.5)
+
+    assert clean_fit is not None
+    assert noisy_fit is not None
+    assert noisy_fit["fit_rms_residual"] > clean_fit["fit_rms_residual"]
+    assert noisy_fit["fit_rms_residual"] == pytest.approx(50.0, rel=0.1)
 
 
 def test_fit_peak_none_below_min_points():

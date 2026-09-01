@@ -219,9 +219,35 @@ fitted curves) before committing to the estimator's internals.
   every captured day in a directory -- knee/peak/fit times and watts
   plotted against date, for watching seasonal knee-time drift build up
   over the weeks/months before the real estimator exists to quantify it
-  properly. `sunknee-pull` generates both automatically (`sunknee-plot`
-  per day, `sunknee-summary` once across all of them) since it calls the
-  same underlying functions.
+  properly, plus a third panel with two deliberately-separate confidence
+  signals: `peak_ratio` (today's filtered peak relative to the best seen
+  across the whole directory -- a pvlib-free stand-in for the real `kt`
+  clear-sky index) and `fit_relative_residual` (how well the active
+  window agrees with its own fitted curve). Kept apart rather than
+  combined into one score because they catch different failure modes --
+  an overcast day can have a deceptively tight-looking fit (smooth and
+  low, not smooth and informative), which fit quality alone can't
+  distinguish from a genuinely strong, clean day. **Planned upgrade, not
+  built yet**: comparing against a single global best-seen value is
+  crude -- the true achievable clear-sky peak has its own smooth annual
+  envelope (roughly sinusoidal outside the tropics, tracking solar
+  declination; flatter or bimodal near the equator depending on tilt),
+  so a September clear day should be *expected* to peak lower than a
+  June one even under identical conditions. Fitting that envelope and
+  comparing against it, rather than a static max, would be a better
+  reference -- but it also depends on tilt/azimuth to a degree (the
+  annual peak curve's shape shifts with pose), tolerable for a
+  diagnostic confidence signal in a way it wouldn't be if it fed the
+  actual pose estimate. Needs real seasonal calendar spread to fit
+  meaningfully (ideally across a solstice) -- with only ~1 month of
+  same-season data so far, fitting any seasonal curve now would mean
+  fitting noise, a worse reference than the current crude one, not a
+  better one. Revisit once there's enough span, or once the real
+  estimator's own `kt`/clear-sky machinery exists to inform it directly.
+  `sunknee-pull`
+  generates both plots automatically (`sunknee-plot` per day,
+  `sunknee-summary` once across all of them) since it calls the same
+  underlying functions.
 - `src/sunknee/knee.py`, `envelope.py`, `estimator.py`: unimplemented
   stubs for the real algorithm described above — not started yet.
 - Storage on the Pi is unbounded for now: real captured data runs
@@ -485,7 +511,13 @@ combine rather than choose between:
    infinite, don't run the regression at all. Cheaper than always
    fitting and hoping the covariance saves you, and avoids the
    regression occasionally producing a spurious confident-looking fit
-   to what's actually just diffuse-dominated noise.
+   to what's actually just diffuse-dominated noise. Foreshadowed
+   already in the diagnostic tooling: `sunknee.diagnostics.peak_ratios`
+   (a day's peak relative to the best seen, no pvlib needed) is a cheap
+   stand-in for the same idea, kept deliberately separate from fit
+   residual in the summary plot for exactly this reason -- a real `kt`
+   gate is the properly physically-grounded version once `pvlib`'s
+   clear-sky model is actually in play.
 2. **Fit covariance for days that pass the gate.** The quantile-Huber
    regression's parameter covariance at its optimum (from the Hessian
    at convergence, or a quick bootstrap) directly gives the day's
@@ -500,6 +532,33 @@ persistently overcast days (London in October) either get skipped by
 the kt gate or contribute almost nothing via a wide covariance — both
 doing the "don't influence the pose estimate" job, arrived at from the
 filter's own machinery rather than a bolted-on rule.
+
+**Filter vs. smoother.** A plain Kalman filter is causal by
+construction -- it only ever uses data up to and including today, which
+is exactly why confidence calibration is weak early on: it hasn't seen
+enough days yet to know what "good" looks like for this site (kt and
+peak-ratio-style references both need a body of history to be
+meaningful). The standard fix is a Kalman *smoother* (forward-backward,
+e.g. Rauch-Tung-Striebel): run the causal forward pass as normal, then
+a backward pass that revisits every earlier estimate using the *full*
+dataset, not just what was available at the time -- well-trodden
+estimation theory, not something to invent from scratch. Already
+present informally in the diagnostic tooling:
+`sunknee.diagnostics.peak_ratios` compares each day against the best
+peak seen across the *whole* directory, not just days-so-far -- already
+non-causal/batch, not a streaming online comparison.
+
+No real-time constraint exists here (nothing needs a same-day answer
+that can never be revised), so the full RTS-smoother machinery probably
+isn't necessary to get the same benefit: periodically re-run the whole
+estimation over the *entire* accumulated history in batch, rather than
+maintaining one irrevocably-forward-only running state -- every day
+judged using everything eventually known (the second half of the year
+informing the first), without implementing forward-backward Kalman
+machinery specifically. A live incremental filter could still run
+alongside that for a responsive day-to-day published forecast, with the
+periodic batch re-fit recalibrating it and its confidence baselines --
+a refinement worth having eventually, not a requirement to start with.
 
 **Multiple signals, not multiple competing curve shapes.** Knee timing
 and envelope-fit as separate observations, each with genuine per-day

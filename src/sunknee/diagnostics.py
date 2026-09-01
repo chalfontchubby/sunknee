@@ -21,7 +21,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sunknee.capture import DayCapture
+from sunknee.capture import DayCapture, plausible_readings
 from sunknee.naive_knee import RollingPeakTracker, fit_peak, naive_knee_indices
 
 
@@ -35,18 +35,24 @@ def plot_day(
     fit_tau: float = 0.9,
     fit_kappa: float | None = None,
     fit_active_fraction: float = 0.1,
+    max_plausible_watts: float | None = None,
 ) -> None:
     import matplotlib.pyplot as plt
 
     times = [datetime.fromisoformat(r.timestamp) for r in capture.readings]
     watts = [r.watts for r in capture.readings]
 
+    # Raw trace above plots every reading, glitches included, so an
+    # implausible spike stays visible even once it's excluded from
+    # everything derived below (see sunknee.capture.plausible_readings).
+    readings = plausible_readings(capture.readings, max_plausible_watts)
+
     # Same windowed-percentile smoothing apps/sunknee_app.py uses live
     # (RollingPeakTracker), just recomputed locally from the raw capture
     # -- "the filtered output", spikes rejected without needing anything
     # extra persisted from the Pi side.
     tracker = RollingPeakTracker(window=peak_window, percentile=peak_percentile)
-    tracker.replay(capture.readings)
+    tracker.replay(readings)
     smoothed_times = [datetime.fromisoformat(t) for t, _ in tracker.smoothed_series]
     smoothed_watts = [w for _, w in tracker.smoothed_series]
 
@@ -58,10 +64,13 @@ def plot_day(
         color="tab:blue", linewidth=1.5,
     )
 
-    morning_i, evening_i = naive_knee_indices(capture.readings, threshold_w)
+    morning_i, evening_i = naive_knee_indices(readings, threshold_w)
     if morning_i is not None:
-        ax.axvline(times[morning_i], color="tab:green", linestyle="--", label="knee (naive)")
-        ax.axvline(times[evening_i], color="tab:green", linestyle="--")
+        # Indices are into `readings` (filtered), not `times`/`watts`
+        # (raw, unfiltered) -- resolve the timestamp from `readings`
+        # itself rather than reusing the raw arrays' indices.
+        ax.axvline(datetime.fromisoformat(readings[morning_i].timestamp), color="tab:green", linestyle="--", label="knee (naive)")
+        ax.axvline(datetime.fromisoformat(readings[evening_i].timestamp), color="tab:green", linestyle="--")
 
     # Parabola cross-check, same one apps/sunknee_app.py publishes as
     # sensor.sunknee_fit_peak_power_today -- drawn as a full curve here,
@@ -116,6 +125,7 @@ def day_summary(
     fit_tau: float = 0.9,
     fit_kappa: float | None = None,
     fit_active_fraction: float = 0.1,
+    max_plausible_watts: float | None = None,
 ) -> dict:
     """Per-day summary parameters -- knee times, filtered peak time/watts,
     parabola fit peak time/watts -- extracted the same way plot_day and
@@ -124,12 +134,14 @@ def day_summary(
     knee crossing, or not enough points for a fit) comes back as None
     rather than a placeholder value, so callers can skip gaps instead of
     plotting a misleading zero."""
-    morning_i, evening_i = naive_knee_indices(capture.readings, threshold_w)
-    morning_at = capture.readings[morning_i].timestamp if morning_i is not None else None
-    evening_at = capture.readings[evening_i].timestamp if evening_i is not None else None
+    readings = plausible_readings(capture.readings, max_plausible_watts)
+
+    morning_i, evening_i = naive_knee_indices(readings, threshold_w)
+    morning_at = readings[morning_i].timestamp if morning_i is not None else None
+    evening_at = readings[evening_i].timestamp if evening_i is not None else None
 
     tracker = RollingPeakTracker(window=peak_window, percentile=peak_percentile)
-    tracker.replay(capture.readings)
+    tracker.replay(readings)
 
     fit = fit_peak(
         tracker.smoothed_series, min_points=fit_min_points,
@@ -145,6 +157,15 @@ def day_summary(
         "peak_at": tracker.peak_at,
         "fit_peak_watts": fit["fit_peak_watts"] if fit is not None else None,
         "fit_peak_at": fit["fit_peak_at"] if fit is not None else None,
+        # How well the active window agrees with the fitted curve --
+        # NOT the same thing as "was today informative" (see fit_peak).
+        # Relative (fraction of this day's own peak) so it's comparable
+        # across days of very different magnitude.
+        "fit_relative_residual": (
+            fit["fit_rms_residual"] / fit["fit_peak_watts"]
+            if fit is not None and fit["fit_peak_watts"]
+            else None
+        ),
     }
 
 
@@ -153,15 +174,36 @@ def _hour_of_day(iso_timestamp: str) -> float:
     return dt.hour + dt.minute / 60 + dt.second / 3600
 
 
+def peak_ratios(summaries: list[dict]) -> list[float | None]:
+    """Each day's filtered peak relative to the best peak seen across
+    all of them -- a free (no pvlib/clear-sky model needed) stand-in for
+    DESIGN.md's kt clear-sky index: not "was today's absolute output
+    high" but "was today close to what this system's actually capable
+    of." A day can have a clean, tight fit (see fit_relative_residual)
+    while still being useless for pose -- an overcast day is smooth and
+    low, not smooth and informative -- and this is what catches that,
+    which fit quality alone can't. None for days with no peak_watts."""
+    known = [s["peak_watts"] for s in summaries if s["peak_watts"] is not None]
+    if not known or max(known) <= 0:
+        return [None] * len(summaries)
+    best = max(known)
+    return [s["peak_watts"] / best if s["peak_watts"] is not None else None for s in summaries]
+
+
 def plot_summary(data_dir: Path, out_path: Path, **day_summary_kwargs) -> None:
     """Day-to-day trend view across every capture JSON in data_dir: knee/
-    peak/fit times (top panel, hour-of-day) and peak/fit watts (bottom
-    panel) -- e.g. to watch for the seasonal knee-time drift DESIGN.md's
-    algorithm depends on separating tilt from azimuth. Today's file (if
-    present) is included like any other; its "evening knee"/peak-so-far
-    is just wherever capture had gotten to, not a real dusk value yet --
-    expect the most recent point to often look out of step until that
-    day is actually complete.
+    peak/fit times (top panel, hour-of-day), peak/fit watts (middle
+    panel), and two confidence signals (bottom panel) -- e.g. to watch
+    for the seasonal knee-time drift DESIGN.md's algorithm depends on
+    separating tilt from azimuth, and to spot which days are actually
+    trustworthy. peak_ratio and fit_relative_residual are deliberately
+    separate lines, not combined into one score: they measure different
+    failure modes (weak signal vs. noisy fit) and conflating them loses
+    exactly the distinction that matters -- see peak_ratio's docstring.
+    Today's file (if present) is included like any other; its "evening
+    knee"/peak-so-far is just wherever capture had gotten to, not a real
+    dusk value yet -- expect the most recent point to often look out of
+    step until that day is actually complete.
     """
     import matplotlib.pyplot as plt
 
@@ -169,12 +211,13 @@ def plot_summary(data_dir: Path, out_path: Path, **day_summary_kwargs) -> None:
     if not paths:
         raise ValueError(f"no capture JSON files found in {data_dir}")
     summaries = [day_summary(DayCapture.load(p), **day_summary_kwargs) for p in paths]
+    ratios = peak_ratios(summaries)
     # A plain calendar date, not a datetime -- there's no timezone
     # question for "which day is this" the way there is for the
     # readings' own timestamps.
     dates = [datetime.strptime(s["date"], "%Y-%m-%d").date() for s in summaries]  # noqa: DTZ007
 
-    fig, (ax_time, ax_watts) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    fig, (ax_time, ax_watts, ax_confidence) = plt.subplots(3, 1, figsize=(10, 11), sharex=True)
 
     def _time_series(key):
         xs, ys = [], []
@@ -214,8 +257,24 @@ def plot_summary(data_dir: Path, out_path: Path, **day_summary_kwargs) -> None:
         ax_watts.plot(xs, ys, marker="o", markersize=3, label=label, color=color)
 
     ax_watts.set_ylabel("watts")
-    ax_watts.set_xlabel("date")
     ax_watts.legend()
+
+    def _confidence_series(values):
+        xs, ys = [], []
+        for d, v in zip(dates, values):
+            if v is not None:
+                xs.append(d)
+                ys.append(v)
+        return xs, ys
+
+    xs, ys = _confidence_series(ratios)
+    ax_confidence.plot(xs, ys, marker="o", markersize=3, label="peak ratio (vs. best seen)", color="tab:purple")
+    xs, ys = _confidence_series([s["fit_relative_residual"] for s in summaries])
+    ax_confidence.plot(xs, ys, marker="o", markersize=3, label="fit relative residual", color="tab:brown")
+
+    ax_confidence.set_ylabel("ratio")
+    ax_confidence.set_xlabel("date")
+    ax_confidence.legend()
 
     fig.autofmt_xdate()
     fig.tight_layout()
@@ -234,6 +293,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fit-tau", type=float, default=0.9, help="Quantile-Huber tau for the parabola fit; closer to 1.0 hugs the upper envelope harder (default: 0.9)")
     parser.add_argument("--fit-kappa", type=float, default=None, help="Quantile-Huber transition width in watts (default: 5%% of the day's range)")
     parser.add_argument("--fit-active-fraction", type=float, default=0.1, help="Exclude points below this fraction of the day's peak from the parabola fit, not just below --threshold-w (default: 0.1)")
+    parser.add_argument("--max-plausible-watts", type=float, default=None, help="Ignore readings above this for peak/knee/fit (raw trace still shows them) -- e.g. a sensor/Modbus glitch reading 2x your inverter's rated capacity (default: no filtering)")
     args = parser.parse_args(argv)
 
     capture = DayCapture.load(args.capture_json)
@@ -246,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         fit_tau=args.fit_tau,
         fit_kappa=args.fit_kappa,
         fit_active_fraction=args.fit_active_fraction,
+        max_plausible_watts=args.max_plausible_watts,
     )
     print(f"wrote {out_path}")
     return 0
@@ -262,6 +323,7 @@ def summary_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fit-tau", type=float, default=0.9)
     parser.add_argument("--fit-kappa", type=float, default=None)
     parser.add_argument("--fit-active-fraction", type=float, default=0.1)
+    parser.add_argument("--max-plausible-watts", type=float, default=None, help="Ignore readings above this for peak/knee/fit (default: no filtering)")
     args = parser.parse_args(argv)
 
     out_path = args.out or (args.data_dir / "summary.png")
@@ -274,6 +336,7 @@ def summary_main(argv: list[str] | None = None) -> int:
         fit_tau=args.fit_tau,
         fit_kappa=args.fit_kappa,
         fit_active_fraction=args.fit_active_fraction,
+        max_plausible_watts=args.max_plausible_watts,
     )
     print(f"wrote {out_path}")
     return 0

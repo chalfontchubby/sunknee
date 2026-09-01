@@ -1,5 +1,5 @@
 from sunknee.capture import DayCapture, Reading
-from sunknee.diagnostics import _hour_of_day, day_summary
+from sunknee.diagnostics import _hour_of_day, day_summary, peak_ratios
 
 
 def test_hour_of_day():
@@ -33,6 +33,8 @@ def test_day_summary_finds_knee_peak_and_fit():
     assert summary["peak_at"] is not None
     assert summary["fit_peak_watts"] is not None
     assert summary["fit_peak_at"] is not None
+    assert summary["fit_relative_residual"] is not None
+    assert summary["fit_relative_residual"] >= 0.0
 
 
 def test_day_summary_none_for_empty_day():
@@ -46,3 +48,21 @@ def test_day_summary_none_for_empty_day():
     assert summary["peak_watts"] is None
     assert summary["fit_peak_at"] is None
     assert summary["fit_peak_watts"] is None
+    assert summary["fit_relative_residual"] is None
+
+
+def test_peak_ratios_relative_to_best_seen():
+    summaries = [
+        {"peak_watts": 2000.0},
+        {"peak_watts": 500.0},  # an overcast day, low relative to the site's best
+        {"peak_watts": None},  # no data that day
+        {"peak_watts": 1800.0},
+    ]
+
+    ratios = peak_ratios(summaries)
+
+    assert ratios == [1.0, 0.25, None, 0.9]
+
+
+def test_peak_ratios_all_none_when_no_data():
+    assert peak_ratios([{"peak_watts": None}, {"peak_watts": None}]) == [None, None]

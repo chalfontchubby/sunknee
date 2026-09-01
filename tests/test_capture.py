@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from sunknee.capture import DayCapture, Reading, completed_day_files, watts_multiplier
+from sunknee.capture import (
+    DayCapture,
+    Reading,
+    completed_day_files,
+    plausible_readings,
+    watts_multiplier,
+)
 
 
 def test_watts_multiplier_known_units():
@@ -42,3 +48,21 @@ def test_completed_day_files_excludes_today(tmp_path: Path):
 
 def test_completed_day_files_empty_dir(tmp_path: Path):
     assert completed_day_files(tmp_path, today="2026-08-01") == []
+
+
+def test_plausible_readings_filters_above_max_watts():
+    readings = [
+        Reading(timestamp="t0", watts=1000.0),
+        Reading(timestamp="t1", watts=2800.0),
+        Reading(timestamp="t2", watts=5752.0),  # e.g. 2026-08-17's glitch
+    ]
+
+    result = plausible_readings(readings, max_watts=4000.0)
+
+    assert [r.timestamp for r in result] == ["t0", "t1"]
+
+
+def test_plausible_readings_none_max_watts_is_a_no_op():
+    readings = [Reading(timestamp="t0", watts=1000.0), Reading(timestamp="t1", watts=99999.0)]
+
+    assert plausible_readings(readings, max_watts=None) == readings

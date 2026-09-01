@@ -33,7 +33,13 @@ from aiohttp import web
 from appdaemon.plugins.hass.hassapi import Hass
 
 from sunknee import __version__
-from sunknee.capture import DayCapture, Reading, completed_day_files, watts_multiplier
+from sunknee.capture import (
+    DayCapture,
+    Reading,
+    completed_day_files,
+    plausible_readings,
+    watts_multiplier,
+)
 from sunknee.naive_knee import RollingPeakTracker, fit_peak, naive_knee_indices
 
 STATUS_ENTITY = "sensor.sunknee_status"
@@ -55,6 +61,10 @@ class SunKnee(Hass):
         self.peak_percentile = float(self.args.get("peak_percentile", 95.0))
         self.peak_window = int(self.args.get("peak_window", 40))
         self.fit_min_points = int(self.args.get("fit_min_points", 30))
+        max_plausible_watts = self.args.get("max_plausible_watts")
+        self.max_plausible_watts = (
+            float(max_plausible_watts) if max_plausible_watts is not None else None
+        )
 
         source_unit = self.get_state(self.pv_power_entity, attribute="unit_of_measurement")
         self.watts_multiplier = watts_multiplier(source_unit)
@@ -113,11 +123,17 @@ class SunKnee(Hass):
     def _reset_peak_tracker(self):
         """(Re)build the rolling peak tracker for self.capture's day,
         replaying any readings already on disk -- covers both a fresh
-        day and an app restart partway through one."""
+        day and an app restart partway through one. Only replays
+        plausible readings (see plausible_readings) -- an app restart
+        shouldn't let a sensor glitch already on disk back into live
+        tracking just because it's being replayed rather than freshly
+        received."""
         self.peak_tracker = RollingPeakTracker(
             window=self.peak_window, percentile=self.peak_percentile
         )
-        self.peak_tracker.replay(self.capture.readings)
+        self.peak_tracker.replay(
+            plausible_readings(self.capture.readings, self.max_plausible_watts)
+        )
 
     def _on_power_change(self, entity, attribute, old, new, **kwargs):
         try:
@@ -135,25 +151,39 @@ class SunKnee(Hass):
         self.capture.readings.append(reading)
         self.capture.save(self._capture_path(self.capture.date))
 
-        self.peak_tracker.update(reading)
+        # The stored capture always gets the raw reading, glitch or not
+        # -- only what feeds derived signals (peak tracking, knee
+        # detection, the fit) is protected, so the anomaly stays visible
+        # in the raw record rather than silently vanishing.
+        if self.max_plausible_watts is None or watts <= self.max_plausible_watts:
+            self.peak_tracker.update(reading)
+        else:
+            self.log(
+                f"Ignoring implausible reading {watts:.0f}W from "
+                f"{self.pv_power_entity} (> max_plausible_watts="
+                f"{self.max_plausible_watts:.0f}W) for peak tracking/knee "
+                "detection -- still saved to the raw capture file",
+                level="WARNING",
+            )
 
         self._publish_naive_knees()
         self._publish_stats()
         self._publish_fit_peak()
 
     def _publish_naive_knees(self):
-        morning_i, evening_i = naive_knee_indices(self.capture.readings, self.threshold_w)
+        readings = plausible_readings(self.capture.readings, self.max_plausible_watts)
+        morning_i, evening_i = naive_knee_indices(readings, self.threshold_w)
         if morning_i is None:
             return
         self.set_state(
             KNEE_MORNING_ENTITY,
-            state=self.capture.readings[morning_i].timestamp,
+            state=readings[morning_i].timestamp,
             attributes={"friendly_name": "sunknee morning knee (naive)", "device_class": "timestamp"},
             check_existence=False,
         )
         self.set_state(
             KNEE_EVENING_ENTITY,
-            state=self.capture.readings[evening_i].timestamp,
+            state=readings[evening_i].timestamp,
             attributes={"friendly_name": "sunknee evening knee (naive)", "device_class": "timestamp"},
             check_existence=False,
         )

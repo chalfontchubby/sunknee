@@ -23,3 +23,14 @@ sunknee:
   # Doesn't appear until there are at least this many readings *and* the
   # fit shows a genuine downward hump (not just a rising morning).
   fit_min_points: 30
+  # Sanity ceiling for peak tracking/knee detection/the fit (NOT for the
+  # stored capture file, which always keeps the raw reading either way).
+  # Real over-nameplate output happens (cloud-edge irradiance
+  # enhancement) but is modest, a few percent -- not a multiple. Set
+  # from this site's known 7x400W ~= 2.8kW array: 4000W comfortably
+  # clears the ~3040W cloud-edge-enhancement readings actually observed
+  # (2026-08-17, 12:10-14:55) while catching the same day's later,
+  # clearly-implausible 4260-5750W cluster (17:06-17:46, well past when
+  # real output should be declining, not doubling). Adjust if your
+  # array's rated capacity differs, or unset (omit this line) to disable.
+  max_plausible_watts: 4000

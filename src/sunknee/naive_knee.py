@@ -257,6 +257,15 @@ def fit_peak(
     vertex_watts = a * vertex_x**2 + b * vertex_x + c
     vertex_at = (base + timedelta(minutes=vertex_x)).isoformat()
 
+    # How well the active-window data actually agrees with the fitted
+    # curve -- NOT the same question as "was there a strong signal
+    # today" (see fit_peak's docstring: an overcast day can be smooth
+    # and low, giving a deceptively tight residual around essentially
+    # nothing). Callers wanting a real confidence measure need both this
+    # and something like peak-relative-to-best-seen, not this alone.
+    residuals = [w - (a * x**2 + b * x + c) for x, w in zip(xs, watts)]
+    rms_residual = (sum(r**2 for r in residuals) / len(residuals)) ** 0.5
+
     return {
         "fit_peak_watts": vertex_watts,
         "fit_peak_at": vertex_at,
@@ -270,4 +279,5 @@ def fit_peak(
         "base": timestamps[0],
         "x_min": min(xs),
         "x_max": max(xs),
+        "fit_rms_residual": rms_residual,
     }
