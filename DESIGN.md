@@ -203,10 +203,25 @@ fitted curves) before committing to the estimator's internals.
 - `src/sunknee/naive_knee.py`: placeholder threshold-crossing knee
   detector powering those HA sensors — explicitly not the real
   algorithm above (no direct/diffuse decomposition, no linear
-  extrapolation), just enough to sanity-check that data is flowing.
+  extrapolation), just enough to sanity-check that data is flowing. Its
+  parabola cross-check fit does use a real prototype of the asymmetric
+  quantile-Huber loss the real algorithm calls for, though (IRLS,
+  `_fit_quadratic_quantile_huber`) -- not the plain least-squares it
+  started as.
 - `src/sunknee/diagnostics.py`: local-only matplotlib CLI
   (`uv run sunknee-plot capture.json`) that plots a captured day's raw
-  curve with the naive knee markers.
+  curve, the same windowed-percentile filtered curve
+  `RollingPeakTracker` computes live (recomputed locally from the raw
+  capture, nothing extra needed from the Pi), the naive knee markers,
+  and the parabola cross-check drawn as a full curve rather than just
+  its vertex. Also `uv run sunknee-summary ./data`
+  (`sunknee.diagnostics.plot_summary`): a day-to-day trend view across
+  every captured day in a directory -- knee/peak/fit times and watts
+  plotted against date, for watching seasonal knee-time drift build up
+  over the weeks/months before the real estimator exists to quantify it
+  properly. `sunknee-pull` generates both automatically (`sunknee-plot`
+  per day, `sunknee-summary` once across all of them) since it calls the
+  same underlying functions.
 - `src/sunknee/knee.py`, `envelope.py`, `estimator.py`: unimplemented
   stubs for the real algorithm described above — not started yet.
 - Storage on the Pi is unbounded for now: real captured data runs
@@ -360,9 +375,85 @@ single clean day:
 - Take the Nth percentile (e.g. 80–95th, not max) of output at each
   time-of-day over a rolling multi-week window.
 - Percentile rather than max specifically to reject midday overshoot
-  outliers (cloud-edge irradiance enhancement, inverter clipping at
-  rated power) — a real but midday-only phenomenon, doesn't touch the
-  knee-based fit since that's a dawn/dusk, low-power regime.
+  outliers (cloud-edge irradiance enhancement) — a real but midday-only
+  phenomenon, doesn't touch the knee-based fit since that's a dawn/dusk,
+  low-power regime.
+- **Confirmed from real data**: this site clips. Filtered peak sits at a
+  flat ~2.7-3.0kW on clear days (2026-08-31 example), matching a 7×400W
+  array's ~2.8kW DC nameplate almost exactly, and the tops of clear-day
+  curves are visibly flat rather than smoothly peaked. Worth being
+  precise about the distinction from the overshoot bullet above:
+  clipping is a *sustained plateau* lasting a real fraction of midday on
+  clear days, not a brief outlier -- the envelope method should
+  represent it as the genuine observed ceiling (percentile naturally
+  does this correctly, since it's common enough within the window to
+  not get rejected), not treat it as noise to reject the way a rare
+  cloud-edge spike is. Confirms the parabola cross-check
+  (`sunknee.naive_knee.fit_peak`) is a poor *shape* for clipped days
+  specifically: plotted as a full curve (`sunknee-plot`/`sunknee-pull`
+  now overlay it, not just its vertex), a parabola can't represent a
+  flat top at all, whatever loss function fits it. Originally also
+  undershot the real plateau by ~700-1000W with plain least-squares
+  (symmetric loss pulled down by cloud dropouts -- see "Fitting against
+  asymmetric noise" and "Multiple signals, not multiple competing curve
+  shapes" below); switching the fit itself to quantile-Huber (tau=0.9,
+  tracking the upper envelope) fixed that part -- now hugs the top of
+  the plateau closely (2026-08-10 example) rather than cutting through
+  the middle -- while the flat-top-vs-parabola shape mismatch remains,
+  as expected, since only the real geometric model fixes that. Concrete
+  evidence for why the real algorithm needs to fit against the exact
+  geometric model rather than a generic polynomial, same reasoning as
+  the knee-estimation section above.
+- **A parabola can go negative; the sun can't.** Originally fit against
+  the *whole* day's smoothed series, including the flat near-zero
+  stretches before dawn and after dusk -- a parabola has no way to be
+  curved in the middle and flat at the edges at once, and since nothing
+  constrains it to stay >=0, it extrapolated to physically impossible
+  negative watts trying to reconcile the two (visibly, in the plotted
+  curve). Fixed by trimming `fit_peak`'s input to the active window
+  (watts > threshold_w, same threshold naive_knee_indices uses) before
+  fitting at all, not just clipping the output after the fact. That
+  removed the worst of it (no more diving to large negative values deep
+  into the night) but not quite all of it: even fit only to positive
+  active-window data, the fitted curve can still dip slightly negative
+  right at that window's own edges, because a parabola's curvature is
+  constant while real solar power eases up from zero gently near the
+  knee rather than linearly -- a parabola wide enough to match the
+  midday peak doesn't have enough freedom left to also match that gentle
+  edge behaviour. `sunknee.diagnostics` clips the *drawn* curve to >=0
+  as a pragmatic finish (the fit's own coefficients are left honest,
+  unclipped); fully resolving it needs the real geometric shape, not a
+  patch on top of the wrong one -- same conclusion as the flat-top
+  clipping mismatch above, from a different direction.
+- **Circularity concern, raised and addressed differently than first
+  discussed.** Trimming `fit_peak`'s input using the same threshold that
+  also defines the naive knee markers means the two aren't fully
+  independent measurements -- if they roughly agree, part of that
+  agreement is manufactured by sharing a boundary, not discovered by the
+  fit. Properly fixing that means the knee times becoming genuine *fit
+  outputs* instead of an externally-imposed boundary -- e.g. fitting
+  `k + max(0, A·sin(π·(t−t1)/(t2−t1)))` (ambient + a clipped direct
+  term, matching the direct/diffuse decomposition above almost exactly)
+  against the whole day with no trimming at all, t1/t2 falling out of
+  the fit. That needs real nonlinear optimization (t1/t2 sit inside the
+  sine's argument; unlike the quadratic case there's no closed form) --
+  judged not worth building for a diagnostic cross-check when it's this
+  close to just being the real algorithm, so parked rather than built.
+  Cheaper interim fix taken instead: raise the active-window threshold
+  to `max(threshold_w, active_fraction * today's peak)` (10% by
+  default) rather than just `threshold_w` alone -- excludes the shallow
+  "easing in" region near the knees too (never looked parabolic
+  either -- real power rises roughly linearly there, a parabola can't),
+  which was also why the fit looked implausibly wide. Doesn't remove the
+  circularity, just narrows the window it's threshold-gated over, but
+  costs nothing beyond a second, data-relative threshold and visibly
+  fixed the width complaint. Known gap left deliberately unhandled: on a
+  heavily overcast day "peak" is itself just diffuse noise, and
+  active_fraction relative to a noisy peak can produce a fit that looks
+  structurally valid while being meaningless -- no clear-sky gating
+  here, that's the real filter's `kt` pre-gate's job (see "State update
+  over time" below): skip low-signal days outright rather than make this
+  diagnostic fit smart about it.
 - Prior art: Lonij et al. used 80th percentile of time-matched
   historical output for tilt/orientation estimation across a PV fleet;
   the "Statistical Clear Sky Fitting" (SCSF) method (Meyers et al.,
@@ -409,6 +500,23 @@ persistently overcast days (London in October) either get skipped by
 the kt gate or contribute almost nothing via a wide covariance — both
 doing the "don't influence the pose estimate" job, arrived at from the
 filter's own machinery rather than a bolted-on rule.
+
+**Multiple signals, not multiple competing curve shapes.** Knee timing
+and envelope-fit as separate observations, each with genuine per-day
+confidence feeding one filter, is the design. Deliberately not the same
+thing as fitting several candidate curve *shapes* (parabola, sinusoid,
+...) to the same data and trusting whichever fits best or reports the
+tightest covariance: fit covariance only captures noise sensitivity, not
+model misspecification, and a structurally wrong model can report
+deceptively tight covariance right alongside a systematically biased
+answer. Concrete proof already in hand, even after fixing the parabola
+cross-check's loss function to track the upper envelope (see the
+envelope section above): it now fits the plateau's *height* well, but
+still can't represent a flat top at all -- no amount of reweighting
+fixes a shape that's structurally wrong, only picking the right shape
+does. That's exactly why the knee-estimation method fits against the
+one physically-correct `pvlib` geometric curve instead of picking from
+a menu of generic shapes.
 
 ### Stretch goal: horizon profile from power data
 A horizon profile (azimuth/elevation pairs describing the site's

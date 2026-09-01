@@ -93,6 +93,11 @@ Either way, this currently marks the naive threshold-based knee, not
 the real geometric estimate (not built yet) — just enough to
 sanity-check captured data.
 
+`sunknee-pull` also generates `data/summary.png` automatically (skip
+with `--no-summary`) — knee/peak/fit times and watts plotted day-to-day
+across everything in the directory, for watching trends build up over
+weeks. Regenerate it on its own with `uv run sunknee-summary ./data`.
+
 ## Deploying to AppDaemon
 
 1. Clone this repo **directly into a real directory under AppDaemon's

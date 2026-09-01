@@ -1,7 +1,8 @@
 #!/usr/bin/env -S uv run python
 """Local-only: pull the capture-download zip from the deployed sunknee
-app, unpack it into a local data directory, and plot every day found
-there.
+app, unpack it into a local data directory, plot every day found there,
+and plot a day-to-day summary trend across all of them
+(sunknee.diagnostics.plot_summary).
 
 Requires the `diagnostics` dependency group (matplotlib, via
 sunknee.diagnostics.plot_day) -- not run on the AppDaemon/HA side.
@@ -26,7 +27,7 @@ import zipfile
 from pathlib import Path
 
 from sunknee.capture import DayCapture
-from sunknee.diagnostics import plot_day
+from sunknee.diagnostics import plot_day, plot_summary
 
 DEFAULT_HOST = "homeassistant.local"
 DEFAULT_PORT = 5050
@@ -66,7 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default=DEFAULT_HOST, help=f"AppDaemon host (default: {DEFAULT_HOST})")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"AppDaemon HTTP port (default: {DEFAULT_PORT})")
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR, help=f"Local directory to unpack into (default: {DEFAULT_DATA_DIR})")
-    parser.add_argument("--no-plot", action="store_true", help="Skip plotting after pulling")
+    parser.add_argument("--no-plot", action="store_true", help="Skip per-day plotting after pulling")
+    parser.add_argument("--no-summary", action="store_true", help="Skip the day-to-day summary plot after pulling")
     parser.add_argument(
         "--and-clear",
         action="store_true",
@@ -96,6 +98,11 @@ def main(argv: list[str] | None = None) -> int:
             capture = DayCapture.load(path)
             plot_day(capture, out_path)
             print(f"  plotted {out_path}")
+
+    if not args.no_summary:
+        summary_path = args.data_dir / "summary.png"
+        plot_summary(args.data_dir, summary_path)
+        print(f"  plotted {summary_path}")
 
     return 0
 

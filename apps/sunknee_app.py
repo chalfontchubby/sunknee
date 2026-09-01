@@ -232,7 +232,11 @@ class SunKnee(Hass):
         )
 
     def _publish_fit_peak(self):
-        fit = fit_peak(self.peak_tracker.smoothed_series, min_points=self.fit_min_points)
+        fit = fit_peak(
+            self.peak_tracker.smoothed_series,
+            min_points=self.fit_min_points,
+            threshold_w=self.threshold_w,
+        )
         if fit is None:
             return  # not enough data yet for a meaningful fit
         self.set_state(

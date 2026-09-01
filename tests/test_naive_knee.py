@@ -4,7 +4,14 @@ from itertools import pairwise
 import pytest
 
 from sunknee.capture import Reading
-from sunknee.naive_knee import RollingPeakTracker, fit_peak, naive_knee_indices
+from sunknee.naive_knee import (
+    RollingPeakTracker,
+    _fit_quadratic,
+    _fit_quadratic_quantile_huber,
+    _quantile_huber_weight,
+    fit_peak,
+    naive_knee_indices,
+)
 
 
 def test_finds_first_and_last_reading_above_threshold():
@@ -117,6 +124,31 @@ def test_fit_peak_none_below_min_points():
     assert fit_peak(series, min_points=30) is None
 
 
+def test_fit_peak_excludes_flat_dark_stretches_either_side():
+    # Real days look like: flat near-zero night, curved daylight bell,
+    # flat near-zero night again. A parabola fit to the *whole* thing --
+    # including the flat tails -- has no way to be both curved in the
+    # middle and flat at the edges, and since nothing keeps a parabola
+    # >=0 it extrapolates to physically impossible negative watts trying
+    # to reconcile the two. Only the active (> threshold_w) window
+    # should reach the fit at all.
+    daylight_x = list(range(0, 201, 2))
+    daylight_series, base = _parabola_series(daylight_x, vertex_x=100.0, vertex_watts=2000.0)
+    night_before = [((base + timedelta(minutes=x)).isoformat(), 0.0) for x in range(-120, 0, 5)]
+    night_after = [((base + timedelta(minutes=x)).isoformat(), 0.0) for x in range(202, 322, 5)]
+    full_day = night_before + daylight_series + night_after
+
+    fit = fit_peak(full_day, min_points=30, threshold_w=10.0)
+
+    assert fit is not None
+    assert fit["fit_peak_watts"] == pytest.approx(2000.0, abs=1.0)
+    # x_min/x_max reflect the trimmed active window, not the padded
+    # full-day range -- the fit was never asked to explain the flat
+    # tails in the first place.
+    assert fit["x_min"] == pytest.approx(0.0)
+    assert fit["x_max"] == pytest.approx(200.0)
+
+
 def test_fit_peak_none_during_monotonic_rise():
     # A straight-line rise fits a=0 exactly -- not concave-down, so no
     # hump has been seen yet.
@@ -126,6 +158,79 @@ def test_fit_peak_none_during_monotonic_rise():
     ]
 
     assert fit_peak(series, min_points=30) is None
+
+
+def test_quantile_huber_weight_favours_upper_envelope_when_tau_high():
+    # tau close to 1: a point below the fit (cloud dropout) barely
+    # matters; a point above it (approaching the true curve) matters a
+    # lot. Same magnitude residual, opposite sign, well outside kappa so
+    # we're in the pure 1/|r| regime.
+    below = _quantile_huber_weight(residual=-500.0, tau=0.9, kappa=10.0)
+    above = _quantile_huber_weight(residual=500.0, tau=0.9, kappa=10.0)
+
+    assert above > below
+    assert above == pytest.approx(0.9 / 500.0)
+    assert below == pytest.approx(0.1 / 500.0)
+
+
+def test_quantile_huber_weight_symmetric_at_tau_half():
+    below = _quantile_huber_weight(residual=-500.0, tau=0.5, kappa=10.0)
+    above = _quantile_huber_weight(residual=500.0, tau=0.5, kappa=10.0)
+
+    assert below == pytest.approx(above)
+
+
+def test_quantile_huber_fit_resists_downward_notches_better_than_ols():
+    # A clean parabola (true vertex 2000W) with a handful of points
+    # knocked down hard -- cloud dropouts, no upward outliers, exactly
+    # the asymmetric noise structure DESIGN.md describes. Plain OLS
+    # should get pulled down by the notches; the quantile-Huber fit
+    # (tau=0.9, tracking the upper envelope) should resist that pull.
+    x_values = list(range(0, 201, 2))
+    series, base = _parabola_series(x_values, vertex_x=100.0, vertex_watts=2000.0)
+
+    notched = list(series)
+    for i in (10, 25, 40, 55, 70):
+        ts, watts = notched[i]
+        notched[i] = (ts, watts * 0.3)  # a cloud-dropout-style notch
+
+    xs = [(datetime.fromisoformat(t) - base).total_seconds() / 60.0 for t, _ in notched]
+    ys = [w for _, w in notched]
+
+    def vertex_watts(coeffs):
+        a, b, c = coeffs
+        vx = -b / (2 * a)
+        return a * vx**2 + b * vx + c
+
+    ols_vertex = vertex_watts(_fit_quadratic(xs, ys))
+    huber_vertex = vertex_watts(_fit_quadratic_quantile_huber(xs, ys, tau=0.9))
+
+    # True peak is 2000W. OLS undershoots, dragged down by the notches;
+    # quantile-Huber lands substantially closer to the truth.
+    assert ols_vertex < huber_vertex
+    assert huber_vertex == pytest.approx(2000.0, abs=50.0)
+    assert ols_vertex < 1950.0
+
+
+def test_fit_peak_active_fraction_narrows_window_beyond_threshold_w():
+    # A shallow (wide) parabola so its "easing in" region -- above
+    # threshold_w but still well below 10% of peak -- actually falls
+    # within the observed range. active_fraction should exclude that
+    # region too, not just the flat-dark stretches threshold_w alone
+    # catches, giving a visibly narrower active window.
+    x_values = list(range(-1000, 1201, 20))
+    series, _ = _parabola_series(x_values, vertex_x=100.0, vertex_watts=2000.0, width=500.0)
+
+    narrow = fit_peak(series, min_points=30, threshold_w=10.0, active_fraction=0.1)
+    wide = fit_peak(series, min_points=30, threshold_w=10.0, active_fraction=0.0)
+
+    assert narrow is not None
+    assert wide is not None
+    # x_min is always 0.0 by construction (each fit's x-axis is relative
+    # to its own first active point) -- compare the window's actual
+    # duration and absolute start instead.
+    assert (narrow["x_max"] - narrow["x_min"]) < (wide["x_max"] - wide["x_min"])
+    assert narrow["base"] > wide["base"]
 
 
 def test_fit_peak_none_when_vertex_outside_observed_range():
