@@ -190,16 +190,42 @@ Diagnostics and integration were built before the algorithm, deliberately
 fitted curves) before committing to the estimator's internals.
 
 - `src/sunknee/capture.py`: stdlib-only day-capture data model (JSON),
-  used both by the AppDaemon app and local tooling.
+  used both by the AppDaemon app and local tooling. Also carries an
+  optional daily snapshot of Predbat's own Solcast-derived forecast
+  entities (`solcast_forecast` on `DayCapture` -- Predbat pulls Solcast
+  directly, no separate HA integration for it here) stored as a raw,
+  unmodelled blob, plus `solcast_watts_series` to extract a given day's
+  half-hourly P10/50/90 as watts (converted from Predbat's kWh-per-
+  period figures) with correct UTC-vs-local-date handling (Predbat's
+  `period_start` is UTC; a 23:00 UTC period is already tomorrow in
+  BST/CEST -- matched against the local calendar date, not string-
+  compared against the raw UTC value). Motivation is two-fold: sanity-
+  checking Solcast's own accuracy against real captured generation
+  (directly relevant to the ~30-35% underestimate noted in Context/why
+  above), and -- separately, not the same thing -- exploring whether
+  Solcast's day-ahead P10/50/90 spread correlates with actual intra-day
+  spikiness (cloud-edge bursts, broken-cloud variability), which would
+  make it a *leading indicator* Predbat could use to size export/battery
+  buffers ahead of time. It is **not** a direct measurement of
+  spikiness itself: Solcast's spread is inter-scenario/day-ahead
+  forecast uncertainty at ~30min resolution, not sub-period variability
+  -- that's a separate, still-open analysis on sunknee's own raw-vs-
+  smoothed capture data, not something Solcast's forecast can give
+  directly regardless of resolution.
 - `apps/sunknee_app.py`: deployed AppDaemon app. Publishes a
   `sensor.sunknee_status` liveness sensor, listens to the Sigenergy PV
   power sensor, writes/updates a per-day JSON capture file, publishes
   naive knee-time sensors (`sensor.sunknee_knee_morning` / `_evening`,
   monotonic rolling peak, and a same-day parabola-fit cross-check) so
   the raw signal can be charted natively in HA without anything extra
-  installed there, and registers a `/app/sunknee_download` route that
+  installed there, registers a `/app/sunknee_download` route that
   zips the capture files with a download header -- pulls data to a
-  laptop for local analysis without SSH/Samba.
+  laptop for local analysis without SSH/Samba -- and once daily
+  (`solcast_capture_time`, default 00:05) snapshots
+  `sensor.predbat_pv_today`/`_tomorrow` into that day's capture file. A
+  single daily read is a deliberate, accepted limitation: Solcast/
+  Predbat's forecast can update intraday, this only ever sees whatever
+  it looked like at capture time.
 - `src/sunknee/naive_knee.py`: placeholder threshold-crossing knee
   detector powering those HA sensors — explicitly not the real
   algorithm above (no direct/diffuse decomposition, no linear
@@ -208,13 +234,38 @@ fitted curves) before committing to the estimator's internals.
   quantile-Huber loss the real algorithm calls for, though (IRLS,
   `_fit_quadratic_quantile_huber`) -- not the plain least-squares it
   started as.
+  **Known bug, deliberately not fixed yet (2026-08-26 example)**:
+  `RollingPeakTracker`'s trailing window is sized in reading *count*
+  (40 readings), not wall-clock time. A ~1.5hr gap in incoming readings
+  (HA/the integration apparently just not emitting state-changes while
+  the sensor sat near 0 -- confirmed via the raw capture, next reading
+  18:47:34 to 20:16:26) left the window mostly full of stale ~800W
+  entries from just before the gap; only one entry gets evicted per new
+  reading, so `smoothed_series` reported a flat, wrong ~826W across the
+  *entire* gap (confirmed directly -- 826.0 at 18:47:34, still 826.0 at
+  20:16:26) instead of decaying toward zero. Doesn't corrupt the naive
+  knee (computed from raw readings, correct at 18:47:29) or that day's
+  peak-so-far (826 < the real midday peak), but does feed the parabola
+  fit's active window (826W clears the threshold) and visibly misleads
+  the plot. Real fix: window sized in minutes, not reading count -- a
+  gap then naturally empties it rather than stranding stale entries,
+  and removes an existing wart (`peak_window`'s config comment already
+  admits readings-vs-time is something the user has to mentally
+  convert). Deferred: changes `RollingPeakTracker`'s constructor
+  semantics (breaking), touches `apps.yaml`/CLI config, and every
+  existing test using placeholder (non-ISO) timestamps for convenience
+  would need real ones for time-based eviction to work -- a bigger
+  lift than most fixes so far, parked rather than rushed.
 - `src/sunknee/diagnostics.py`: local-only matplotlib CLI
   (`uv run sunknee-plot capture.json`) that plots a captured day's raw
   curve, the same windowed-percentile filtered curve
   `RollingPeakTracker` computes live (recomputed locally from the raw
   capture, nothing extra needed from the Pi), the naive knee markers,
-  and the parabola cross-check drawn as a full curve rather than just
-  its vertex. Also `uv run sunknee-summary ./data`
+  the parabola cross-check drawn as a full curve rather than just its
+  vertex, and -- if that day's capture has a `solcast_forecast`
+  snapshot -- Predbat's Solcast-derived P10-P90 band (shaded) and P50
+  (dash-dot line) for a direct visual comparison against real
+  generation. Also `uv run sunknee-summary ./data`
   (`sunknee.diagnostics.plot_summary`): a day-to-day trend view across
   every captured day in a directory -- knee/peak/fit times and watts
   plotted against date, for watching seasonal knee-time drift build up

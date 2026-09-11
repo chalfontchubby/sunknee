@@ -34,3 +34,14 @@ sunknee:
   # real output should be declining, not doubling). Adjust if your
   # array's rated capacity differs, or unset (omit this line) to disable.
   max_plausible_watts: 4000
+  # Once daily (solcast_capture_time), snapshot Predbat's own
+  # Solcast-derived forecast entities into that day's capture file, for
+  # later comparison against what actually happened. Predbat pulls
+  # Solcast directly (no separate ha-solcast-solar integration here), so
+  # these are Predbat's own published entities, not a raw Solcast one --
+  # check Developer Tools > States for the exact names if Predbat's
+  # config differs. Either can be omitted; the job only runs if at
+  # least one is set.
+  solcast_today_entity: sensor.predbat_pv_today
+  solcast_tomorrow_entity: sensor.predbat_pv_tomorrow
+  solcast_capture_time: "00:05:00"

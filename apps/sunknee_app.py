@@ -1,7 +1,7 @@
 """AppDaemon entry point for sunknee.
 
 Deployed onto the Home Assistant/AppDaemon host (see apps/apps.yaml and
-README.md "Deploying" for how this directory gets there). Three jobs,
+README.md "Deploying" for how this directory gets there). Four jobs,
 all ahead of any real estimation algorithm (see DESIGN.md):
 
 1. Liveness: publish sensor.sunknee_status so the app's presence is
@@ -17,6 +17,12 @@ all ahead of any real estimation algorithm (see DESIGN.md):
    Content-Disposition header, so hitting the URL in a browser saves a
    zip straight to Downloads, the same way Predbat's debug-info download
    works.
+4. Once daily, snapshot Predbat's own Solcast-derived forecast entities
+   (sensor.predbat_pv_today/_tomorrow -- Predbat pulls Solcast directly,
+   no separate HA integration needed) into that day's capture file, for
+   later comparison against what actually happened. One read a day is a
+   deliberate, accepted limitation -- Solcast/Predbat's forecast can
+   update intraday, this only ever sees the snapshot at capture time.
 
 Only imports sunknee.capture and sunknee.naive_knee, both stdlib-only --
 matplotlib (sunknee.diagnostics) is never loaded on this side. aiohttp
@@ -65,6 +71,9 @@ class SunKnee(Hass):
         self.max_plausible_watts = (
             float(max_plausible_watts) if max_plausible_watts is not None else None
         )
+        self.solcast_today_entity = self.args.get("solcast_today_entity")
+        self.solcast_tomorrow_entity = self.args.get("solcast_tomorrow_entity")
+        self.solcast_capture_time = self.args.get("solcast_capture_time", "00:05:00")
 
         source_unit = self.get_state(self.pv_power_entity, attribute="unit_of_measurement")
         self.watts_multiplier = watts_multiplier(source_unit)
@@ -97,6 +106,8 @@ class SunKnee(Hass):
 
         self.listen_state(self._on_power_change, self.pv_power_entity)
         self.register_route(self._download_capture, "sunknee_download")
+        if self.solcast_today_entity or self.solcast_tomorrow_entity:
+            self.run_daily(self._capture_solcast_forecast, self.solcast_capture_time)
 
     def _today(self, now) -> str:
         """now must already be resolved by the caller -- self.get_now()
@@ -135,6 +146,17 @@ class SunKnee(Hass):
             plausible_readings(self.capture.readings, self.max_plausible_watts)
         )
 
+    def _ensure_capture_for(self, now) -> None:
+        """Roll self.capture over to now's date if it isn't already --
+        shared by _on_power_change and _capture_solcast_forecast, since
+        both need this and the scheduled forecast job can fire before
+        any PV reading has rolled the day over itself (no generation at
+        00:05 to trigger it)."""
+        today = self._today(now)
+        if today != self.capture.date:
+            self.capture = self._load_or_start_capture(today)
+            self._reset_peak_tracker()
+
     def _on_power_change(self, entity, attribute, old, new, **kwargs):
         try:
             watts = float(new) * self.watts_multiplier
@@ -142,10 +164,7 @@ class SunKnee(Hass):
             return  # "unknown"/"unavailable" states etc.
 
         now = self.get_now()
-        today = self._today(now)
-        if today != self.capture.date:
-            self.capture = self._load_or_start_capture(today)
-            self._reset_peak_tracker()
+        self._ensure_capture_for(now)
 
         reading = Reading(timestamp=now.isoformat(), watts=watts)
         self.capture.readings.append(reading)
@@ -289,3 +308,29 @@ class SunKnee(Hass):
             },
             check_existence=False,
         )
+
+    def _read_solcast_entity(self, entity_id: str | None) -> dict | None:
+        if not entity_id:
+            return None
+        state = self.get_state(entity_id, attribute="all", default=None)
+        if state is None:
+            self.log(f"Solcast entity {entity_id} not found -- skipping", level="WARNING")
+        return state
+
+    def _capture_solcast_forecast(self, kwargs):
+        """Scheduled once daily (solcast_capture_time, default 00:05) --
+        snapshots Predbat's own Solcast-derived forecast entities
+        (sensor.predbat_pv_today/_tomorrow) verbatim into today's
+        capture file. A deliberate single daily read, not a live
+        subscription: Solcast/Predbat's forecast can update intraday,
+        this only ever sees whatever it looked like at capture time."""
+        now = self.get_now()
+        self._ensure_capture_for(now)
+
+        self.capture.solcast_forecast = {
+            "captured_at": now.isoformat(),
+            "today": self._read_solcast_entity(self.solcast_today_entity),
+            "tomorrow": self._read_solcast_entity(self.solcast_tomorrow_entity),
+        }
+        self.capture.save(self._capture_path(self.capture.date))
+        self.log(f"Captured Solcast/Predbat forecast snapshot for {self.capture.date}")

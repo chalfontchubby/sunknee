@@ -123,7 +123,13 @@ DESIGN.md). Regenerate it on its own with `uv run sunknee-summary ./data`.
    change otherwise. Harmless to `sunknee_app.py` itself either way
    (it never imports the test files), but noisy.
 3. Edit `apps/apps.yaml` and set `pv_power_entity` to your Sigenergy PV
-   power sensor's real entity_id.
+   power sensor's real entity_id. If you run Predbat with its own
+   Solcast pull (no separate `ha-solcast-solar` integration), also set
+   `solcast_today_entity`/`solcast_tomorrow_entity` to Predbat's
+   `sensor.predbat_pv_today`/`_tomorrow` (or your own equivalent) to
+   capture a daily forecast snapshot alongside the real generation data
+   -- `sunknee-plot` overlays it automatically once present. Omit both
+   to skip this entirely.
 4. AppDaemon hot-reloads on file changes. Check HA for
    `sensor.sunknee_status` (should read `running` — the hello-world
    liveness check) and, once there's daylight data,

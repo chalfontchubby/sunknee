@@ -21,7 +21,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sunknee.capture import DayCapture, plausible_readings
+from sunknee.capture import DayCapture, plausible_readings, solcast_watts_series
 from sunknee.naive_knee import RollingPeakTracker, fit_peak, naive_knee_indices
 
 
@@ -57,6 +57,24 @@ def plot_day(
     smoothed_watts = [w for _, w in tracker.smoothed_series]
 
     fig, ax = plt.subplots(figsize=(10, 5))
+
+    # Predbat's own Solcast-derived forecast (P10-P90 shaded, P50 line),
+    # if a daily snapshot was captured -- drawn first so it sits behind
+    # the real curve. Needs a reference timezone to resolve Predbat's
+    # UTC period_start values against this capture's local date (see
+    # solcast_watts_series) -- taken from the first raw reading, since
+    # there's nothing else in a capture to derive it from.
+    if capture.solcast_forecast and times:
+        local_tz = times[0].tzinfo
+        solcast = solcast_watts_series(capture.solcast_forecast, capture.date, local_tz)
+        if solcast:
+            s_times = [datetime.fromisoformat(t) for t, _, _, _ in solcast]
+            s_p10 = [p10 for _, p10, _, _ in solcast]
+            s_p50 = [p50 for _, _, p50, _ in solcast]
+            s_p90 = [p90 for _, _, _, p90 in solcast]
+            ax.fill_between(s_times, s_p10, s_p90, color="tab:purple", alpha=0.15, label="Solcast P10-P90")
+            ax.plot(s_times, s_p50, color="tab:purple", linestyle="-.", linewidth=1.2, label="Solcast P50")
+
     ax.plot(times, watts, label=capture.entity_id, color="tab:orange", alpha=0.5, linewidth=0.8)
     ax.plot(
         smoothed_times, smoothed_watts,
